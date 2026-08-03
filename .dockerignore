@@ -1,0 +1,14 @@
+.git
+.github
+bin
+*.test
+*.out
+.env
+.claude
+README*.md
+CONTRIBUTING.md
+SECURITY.md
+THREAT-MODEL.md
+Prompt.md
+prepare_test.md
+deploy

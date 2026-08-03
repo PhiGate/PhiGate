@@ -2,3 +2,10 @@
 *.test
 *.out
 .env
+
+# Local-only working files, deliberately not published.
+# Prompt.md holds the internal product brief and the security audit that drove
+# this work; .claude/ holds local tooling config. Neither belongs in a public
+# repository, and both are referenced by nothing the build needs.
+/Prompt.md
+/.claude/

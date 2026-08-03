@@ -18,8 +18,8 @@ func collect(transform func(string) string) (*StreamScanner, *strings.Builder, *
 
 func TestScannerBlocksAcrossChunks(t *testing.T) {
 	sc, safe, blocks := collect(nil)
-	// "rm -rf /tmp" is split across three Write calls.
-	for _, d := range []string{"first line\n", "rm -r", "f /tmp\n", "echo after\n"} {
+	// "rm -rf /" is split across three Write calls.
+	for _, d := range []string{"first line\n", "rm -r", "f /\n", "echo after\n"} {
 		if err := sc.Write(d); err != nil {
 			t.Fatal(err)
 		}
@@ -35,7 +35,7 @@ func TestScannerBlocksAcrossChunks(t *testing.T) {
 	if strings.Contains(safe.String(), "echo after") {
 		t.Errorf("content after block should be sealed: %q", safe.String())
 	}
-	if len(*blocks) != 1 || (*blocks)[0] != "rm_recursive_force" {
+	if len(*blocks) != 1 || (*blocks)[0] != "rm_recursive_force_root" {
 		t.Fatalf("expected one rm_recursive_force block, got %v", *blocks)
 	}
 	if !sc.Blocked() {

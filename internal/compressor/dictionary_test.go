@@ -1,6 +1,9 @@
 package compressor
 
-import "testing"
+import (
+	"strconv"
+	"testing"
+)
 
 func TestDictionaryDedupe(t *testing.T) {
 	d := NewDictionary()
@@ -36,7 +39,7 @@ func TestHydrateLongestFirst(t *testing.T) {
 	d := NewDictionary()
 	var last string
 	for i := 1; i <= 12; i++ {
-		last = d.Mask("value-"+itoa(i), ClassVar)
+		last = d.Mask("value-"+strconv.Itoa(i), ClassVar)
 	}
 	if last != "<V12>" {
 		t.Fatalf("expected <V12>, got %q", last)

@@ -1,6 +1,7 @@
 package compressor
 
 import (
+	"strconv"
 	"strings"
 )
 
@@ -10,11 +11,23 @@ import (
 // is sent to an LLM.
 //
 // Simplifications vs. the published Drain3:
-//   - The fixed-depth parse tree is collapsed to a single (tokenCount, firstToken)
-//     bucket key, which is sufficient once the Masker has already normalised
-//     high-cardinality variables to <V*> tokens.
+//   - The fixed-depth parse tree is collapsed to a (tokenCount, firstLiteralToken)
+//     bucket key.
 //   - Variable extraction itself is delegated to the Masker; Drain only marks
 //     intra-cluster positional differences with the "<*>" wildcard.
+//
+// # Why the key skips placeholders
+//
+// The bucket key originally used the plain first token, on the reasoning that
+// the Masker had already normalised variables. It had not: the Masker assigns a
+// *distinct* token per distinct value, so three occurrences of the same error
+// begin with <V1>, <V3>, <V4> — three different first tokens, three different
+// buckets, and no clustering at all.
+//
+// Since almost every log line begins with a timestamp, that made this stage a
+// no-op on real input, which is precisely the input it exists for. The key now
+// skips placeholder tokens, and similar() treats any two placeholders as
+// matching, so lines differing only in their masked values cluster as intended.
 type Drain struct {
 	// simThreshold is the fraction of matching positions required for a line to
 	// join an existing cluster (0..1).
@@ -52,7 +65,7 @@ func (d *Drain) Process(input string, s *Session) (string, error) {
 			continue
 		}
 		tokens := strings.Fields(trimmed)
-		key := itoa(len(tokens)) + "|" + tokens[0]
+		key := bucketKey(tokens)
 
 		matched := false
 		for _, idx := range buckets[key] {
@@ -79,7 +92,7 @@ func (d *Drain) Process(input string, s *Session) (string, error) {
 		b.WriteString(strings.Join(cl.tokens, " "))
 		if cl.count > 1 {
 			b.WriteString(" (x")
-			b.WriteString(itoa(cl.count))
+			b.WriteString(strconv.Itoa(cl.count))
 			b.WriteByte(')')
 		}
 	}
@@ -88,17 +101,59 @@ func (d *Drain) Process(input string, s *Session) (string, error) {
 
 // similar reports whether candidate is close enough to the cluster template to
 // merge. Token counts are guaranteed equal by the bucket key.
+//
+// Two placeholders count as matching whatever their numbers: <V1> and <V7> are
+// both "a masked value in this position", which is exactly the equivalence
+// clustering needs.
 func (d *Drain) similar(template, candidate []string) bool {
 	if len(template) != len(candidate) {
 		return false
 	}
 	same := 0
 	for i := range template {
-		if template[i] == "<*>" || template[i] == candidate[i] {
+		switch {
+		case template[i] == "<*>",
+			template[i] == candidate[i],
+			isPlaceholder(template[i]) && isPlaceholder(candidate[i]):
 			same++
 		}
 	}
 	return float64(same)/float64(len(template)) >= d.simThreshold
+}
+
+// bucketKey groups lines by token count and their first literal token, skipping
+// masked values. Falls back to "*" for a line made entirely of placeholders.
+func bucketKey(tokens []string) string {
+	first := "*"
+	for _, t := range tokens {
+		if !isPlaceholder(t) {
+			first = t
+			break
+		}
+	}
+	return strconv.Itoa(len(tokens)) + "|" + first
+}
+
+// isPlaceholder reports whether tok is a substitution emitted by an earlier
+// pipeline stage rather than literal text from the log.
+func isPlaceholder(tok string) bool {
+	switch tok {
+	case "<*>", "<id>", "<str>", "<int>", "<type>":
+		return true
+	}
+	if strings.HasPrefix(tok, "#REF") {
+		return true
+	}
+	// <V12> and <V12>: — a placeholder possibly carrying trailing punctuation.
+	if strings.HasPrefix(tok, "<V") {
+		rest := tok[2:]
+		i := 0
+		for i < len(rest) && rest[i] >= '0' && rest[i] <= '9' {
+			i++
+		}
+		return i > 0 && i < len(rest) && rest[i] == '>'
+	}
+	return false
 }
 
 // mergeTemplate mutates template in place, replacing any position that differs

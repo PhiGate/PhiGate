@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tenkan/phigate/internal/types"
+	"github.com/phigate/phigate/internal/types"
 )
 
 func TestOpenAIClientChat(t *testing.T) {

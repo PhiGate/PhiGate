@@ -1,0 +1,9 @@
+apiVersion: v2
+name: phigate
+description: SLM gateway for enterprise token optimisation and local data security
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords: [llm, gateway, aiops, finops, privacy, pii, slm]
+home: https://github.com/phigate/phigate
+sources: [https://github.com/phigate/phigate]

@@ -7,7 +7,7 @@ package llm
 import (
 	"context"
 
-	"github.com/tenkan/phigate/internal/types"
+	"github.com/phigate/phigate/internal/types"
 )
 
 // StreamFunc receives each content delta as it arrives from the backend.

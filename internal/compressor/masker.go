@@ -1,71 +1,42 @@
 package compressor
 
-import "regexp"
+import "github.com/phigate/phigate/internal/redact"
 
-// maskRule is one ordered regex substitution. Rules are applied most-specific
-// first so that, e.g., a UUID or an IP embedded in a URL is consumed by the
-// stronger rule before a weaker numeric rule can half-match it.
-type maskRule struct {
-	name string
-	re   *regexp.Regexp
-}
-
-// Masker is the deterministic variable-extraction stage (task 1.1). It scans
-// text for known sensitive/high-cardinality patterns and replaces each match
-// with a dictionary-backed <V*> token. Because substitution goes through the
+// Masker is the deterministic variable-extraction stage. It delegates detection
+// to the redact engine and is responsible only for turning each detected span
+// into a dictionary-backed <V*> token.
+//
+// The split matters: detection is the security guarantee and lives in
+// internal/redact with its own leak-test corpus; this stage owns the token
+// allocation and hydration bookkeeping. Because substitution goes through the
 // Session dictionary, identical values always collapse to the same token and
 // remain hydratable.
 type Masker struct {
-	rules []maskRule
+	engine *redact.Engine
 }
 
-// defaultMaskRules is the initial PhiGate rule set. Order matters: earlier
-// rules win over later ones for overlapping spans.
-var defaultMaskRules = []maskRule{
-	// UUID v1-v5.
-	{"uuid", regexp.MustCompile(`\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b`)},
-	// ISO-8601 timestamps: 2026-06-29T15:04:05(.123)?(Z|+09:00)?
-	{"ts_iso", regexp.MustCompile(`\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?\b`)},
-	// Common syslog timestamp: "Jun 29 15:04:05".
-	{"ts_syslog", regexp.MustCompile(`\b[A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\b`)},
-	// Bearer / authorization tokens.
-	{"bearer", regexp.MustCompile(`(?i)\bBearer\s+[A-Za-z0-9._\-]+`)},
-	// Email addresses.
-	{"email", regexp.MustCompile(`\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b`)},
-	// URLs.
-	{"url", regexp.MustCompile(`\bhttps?://[^\s"'<>]+`)},
-	// MAC addresses.
-	{"mac", regexp.MustCompile(`\b(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}\b`)},
-	// IPv6 (loose).
-	{"ipv6", regexp.MustCompile(`\b(?:[0-9A-Fa-f]{1,4}:){2,7}[0-9A-Fa-f]{1,4}\b`)},
-	// IPv4, optionally with :port.
-	{"ipv4", regexp.MustCompile(`\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(?::\d{1,5})?\b`)},
-	// Absolute unix file paths (at least two segments).
-	{"path", regexp.MustCompile(`(?:/[A-Za-z0-9._\-]+){2,}/?`)},
-	// Long hex blobs (hashes, opaque tokens).
-	{"hex", regexp.MustCompile(`\b[0-9a-fA-F]{16,}\b`)},
-	// Large standalone integers (ids, ports, counts >= 4 digits). Only a
-	// leading boundary is required so values with a trailing unit (e.g.
-	// "12345ms") still have their numeric part masked.
-	{"int", regexp.MustCompile(`\b\d{4,}`)},
-}
-
-// NewMasker returns a Masker loaded with the default rule set.
+// NewMasker returns a Masker using the default redaction engine (all built-in
+// rule packs, entropy detection on, no site-specific internal domains).
 func NewMasker() *Masker {
-	return &Masker{rules: defaultMaskRules}
+	return &Masker{engine: redact.MustEngine(redact.Options{})}
 }
+
+// NewMaskerWith returns a Masker backed by a caller-supplied engine, which is
+// how the gateway applies an enterprise's own rule packs and internal domains.
+func NewMaskerWith(e *redact.Engine) *Masker { return &Masker{engine: e} }
 
 // Name implements Stage.
 func (m *Masker) Name() string { return "masker" }
 
-// Process applies every rule in order. Each match is replaced by a
-// session-stable <V*> token from the dictionary.
+// Process replaces every detected sensitive span with a session-stable <V*>
+// token, and records each span's classification on the Session so the egress
+// policy can later decide whether this payload may leave the building.
 func (m *Masker) Process(input string, s *Session) (string, error) {
-	out := input
-	for _, r := range m.rules {
-		out = r.re.ReplaceAllStringFunc(out, func(match string) string {
-			return s.Dict.Mask(match, ClassVar)
-		})
+	out, findings := m.engine.Redact(input, func(f redact.Finding) string {
+		return s.Dict.MaskAs(f.Text, ClassVar, f.Category)
+	})
+	for _, f := range findings {
+		s.Note(f)
 	}
 	return out, nil
 }

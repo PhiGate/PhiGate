@@ -1,0 +1,158 @@
+# PhiGate Helm values.
+#
+# The defaults here are the ones we would run in production, not the ones that
+# start most easily. In particular: authentication is required, the debug
+# endpoint is off, and the egress policy keeps personal data and credentials off
+# the cloud backend. Loosening any of those should be a deliberate edit.
+
+replicaCount: 2
+
+image:
+  repository: ghcr.io/phigate/phigate
+  tag: ""            # defaults to .Chart.AppVersion
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+service:
+  type: ClusterIP
+  port: 8080
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: phigate.internal.example.com
+      paths: [{ path: /, pathType: Prefix }]
+  tls: []
+
+resources:
+  requests: { cpu: 200m, memory: 256Mi }
+  limits:   { cpu: "2",  memory: 1Gi }
+
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "8080"
+  prometheus.io/path: "/metrics"
+
+# Hardened by default. PhiGate needs no filesystem write access unless you
+# point PHIGATE_AUDIT_LOG at a mounted volume.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  fsGroup: 65532
+  seccompProfile: { type: RuntimeDefault }
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities: { drop: ["ALL"] }
+
+# --- Credentials ---------------------------------------------------------
+# Never put real keys in values.yaml. Either create the secret out of band and
+# set existingSecret, or supply them with --set-string at install time.
+secrets:
+  existingSecret: ""        # a Secret with PHIGATE_API_KEYS and PHIGATE_CLOUD_API_KEY
+  apiKeys: ""               # "clientkey1:team-sre,clientkey2:team-app"
+  cloudApiKey: ""
+
+# --- Backends ------------------------------------------------------------
+backends:
+  local:
+    provider: openai                                  # ollama/vLLM speak this
+    baseUrl: http://ollama.ai.svc.cluster.local:11434/v1
+    model: phi4-mini
+  cloud:
+    provider: openai                                  # or: azure
+    baseUrl: https://api.openai.com/v1
+    model: gpt-4o
+    # For Azure OpenAI — the deployment most JP enterprises actually have:
+    # provider: azure
+    # baseUrl: https://your-resource.openai.azure.com
+    # apiVersion: "2024-10-21"
+    # deployment: your-gpt4o-deployment
+    apiVersion: ""
+    deployment: ""
+
+# --- Egress policy -------------------------------------------------------
+# cloudMaxSensitivity is the highest classification permitted to reach a cloud
+# provider. "internal" lets masked topology out and keeps personal data and
+# credentials in. Set "low" for the strictest posture.
+policy:
+  cloudMaxSensitivity: internal      # low | internal | confidential | restricted
+  denyAboveSensitivity: ""           # empty = never refuse outright
+  allowCloudFallback: true           # only ever applies to cloud-eligible payloads
+
+# --- Redaction -----------------------------------------------------------
+redaction:
+  packs: ""                          # empty = all built-in packs (core, jp, secrets)
+  internalDomains: "internal,corp,local,lan,intra"
+  disableEntropy: false
+  disableRules: ""
+  # Mount a ConfigMap of custom *.json rule packs at /etc/phigate/rules
+  customRulesConfigMap: ""
+
+# --- Guardrails ----------------------------------------------------------
+guard:
+  # rule=severity overrides, e.g. "host_power_state=block,sql_truncate=warn"
+  severityOverrides: ""
+  ingressScan: true
+
+# --- Cache and sessions --------------------------------------------------
+cache:
+  enabled: true
+  ttl: 15m
+  max: 5000
+
+session:
+  ttl: 30m
+  max: 10000
+
+# --- Accounting ----------------------------------------------------------
+pricing:
+  # A ConfigMap holding price-book.json, so savings are reported at your
+  # negotiated rates and in your currency rather than at list price in USD.
+  configMap: ""
+  localCostPerMTok: "0"
+
+# --- Observability -------------------------------------------------------
+observability:
+  # Empty (the default) writes structured JSON audit records to stderr, which is
+  # what you want in Kubernetes: your existing log pipeline collects them and
+  # ships them somewhere append-only.
+  #
+  # Setting a file path here makes the chart mount auditVolume at that path's
+  # directory, because the container runs with a read-only root filesystem.
+  # Prefer stderr unless you have a specific reason: an emptyDir loses the audit
+  # trail when the pod is rescheduled, which defeats the point of keeping one.
+  auditLog: ""
+  auditVolume:
+    emptyDir: {}
+    # Or point it at durable storage:
+    # persistentVolumeClaim:
+    #   claimName: phigate-audit
+  dashboard: true
+  debug: false                       # ⚠️ /debug/compress returns plaintext. Keep false.
+
+serving:
+  rateLimitPerMin: 0                 # 0 = unlimited
+  rateLimitBurst: 0
+  maxBodyBytes: 4194304
+  shutdownGrace: 20s
+  upstreamRetries: 2
+  trustedProxyHeader: ""             # set only if a proxy you control sets it
+
+extraEnv: []

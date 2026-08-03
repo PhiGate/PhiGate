@@ -5,14 +5,14 @@
 //
 // The layer is a composable pipeline of Stages run in order:
 //
-//	Masker  -> Drain -> RefDict -> ASTPrune
+//		Masker  -> Drain -> RefDict -> ASTPrune
 //
-//   - Masker   replaces high-cardinality variables (IPs, UUIDs, timestamps, …)
-//     with <V1>, <V2> tokens.
-//   - Drain    clusters near-identical log lines into a single template.
-//   - RefDict  folds repetitive long strings (package paths) into #REF tokens.
-//   - ASTPrune strips business values from code snippets, keeping only logical
-//     structure and error nodes (via tree-sitter).
+//	  - Masker   replaces high-cardinality variables (IPs, UUIDs, timestamps, …)
+//	    with <V1>, <V2> tokens.
+//	  - Drain    clusters near-identical log lines into a single template.
+//	  - RefDict  folds repetitive long strings (package paths) into #REF tokens.
+//	  - ASTPrune strips business values from code snippets, keeping only logical
+//	    structure and error nodes (via tree-sitter).
 //
 // Every substitution is recorded in the Session's Dictionary so the gateway can
 // re-hydrate the LLM's answer for the human operator.

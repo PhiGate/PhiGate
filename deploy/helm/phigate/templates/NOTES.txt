@@ -1,0 +1,30 @@
+PhiGate {{ .Chart.AppVersion }} is installed as {{ include "phigate.fullname" . }}.
+
+Effective controls:
+
+  egress policy   cloud egress ≤ {{ .Values.policy.cloudMaxSensitivity }}
+                  cloud fallback {{ .Values.policy.allowCloudFallback }}
+  local backend   {{ .Values.backends.local.provider }} {{ .Values.backends.local.model }}
+  cloud backend   {{ .Values.backends.cloud.provider }} {{ .Values.backends.cloud.model }}
+  cache           {{ if .Values.cache.enabled }}enabled ({{ .Values.cache.ttl }} TTL){{ else }}disabled{{ end }}
+{{- if .Values.observability.debug }}
+
+  ⚠️  observability.debug is TRUE. /debug/compress returns the plaintext of every
+     masked value. Set it to false before this handles production data.
+{{- end }}
+
+Point a client at it:
+
+  kubectl port-forward svc/{{ include "phigate.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }}
+
+  curl localhost:{{ .Values.service.port }}/v1/chat/completions \
+    -H "Authorization: Bearer <your-client-key>" \
+    -H 'Content-Type: application/json' \
+    -d '{"model":"{{ .Values.backends.cloud.model }}","messages":[{"role":"user","content":"disk full on 10.0.0.5"}]}'
+
+Then check what it saved:
+
+  curl -H "Authorization: Bearer <your-client-key>" \
+    localhost:{{ .Values.service.port }}/v1/phigate/stats
+
+Dashboard: /dashboard   Metrics: /metrics   Readiness: /readyz

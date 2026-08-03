@@ -1,26 +1,114 @@
 // Package sandbox implements PhiGate's Dynamic Security Sandbox: the egress
-// guardrail that inspects model output and blocks high-risk, destructive
-// commands before they ever reach an operator or an automation runner.
+// guardrail that inspects model output before it reaches an operator or an
+// automation runner.
 //
-// Detection is deterministic and rule-based (no model in the loop) so the
-// guarantee is auditable: a command is blocked because a named rule matched,
-// and that rule name is reported. The default rule set is intentionally
-// conservative and easily extended for an enterprise's own policy.
+// Detection is deterministic — no model in the loop — so every block is
+// attributable to a named rule, which is what an auditor needs.
+//
+// Two design decisions distinguish this from a regex deny list:
+//
+//  1. **Scope.** Rules run only against text that could plausibly be executed:
+//     fenced code, inline code, and prose lines that are unambiguously commands.
+//     The previous version matched the whole answer, so "reboot the node" and
+//     "graceful shutdown is configured via SIGTERM" were blocked as destructive
+//     commands. A guard that fires on prose gets turned off, and a guard that is
+//     turned off protects nothing.
+//
+//  2. **Structure.** Commands are lexed into argv and matched on program and
+//     flags rather than on surface text. The previous version caught "rm -rf"
+//     but let "rm -f -r /var/lib" and "rm --force --recursive /" through.
+//
+// Severity replaces the old binary block/allow. Most destructive-looking
+// operations are legitimate remediations in context; blocking all of them is
+// what made operators disable the guard. Only unambiguously catastrophic
+// operations block by default.
 package sandbox
 
-import "regexp"
+import (
+	"fmt"
+	"sort"
+	"strings"
+)
 
-// Rule is a named destructive-command pattern.
+// Severity is how seriously the guard treats a matched rule.
+type Severity int
+
+const (
+	// SeverityInfo records the match in audit logs and does nothing else.
+	SeverityInfo Severity = iota
+	// SeverityWarn annotates the response but still delivers it. This is the
+	// right default for operations that are destructive but routinely correct,
+	// like restarting a service.
+	SeverityWarn
+	// SeverityBlock withholds the content.
+	SeverityBlock
+)
+
+// String renders a Severity for config and audit records.
+func (s Severity) String() string {
+	switch s {
+	case SeverityBlock:
+		return "block"
+	case SeverityWarn:
+		return "warn"
+	default:
+		return "info"
+	}
+}
+
+// ParseSeverity maps a config string to a Severity.
+func ParseSeverity(s string) (Severity, bool) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "info", "allow", "off":
+		return SeverityInfo, true
+	case "warn":
+		return SeverityWarn, true
+	case "block", "deny":
+		return SeverityBlock, true
+	}
+	return SeverityInfo, false
+}
+
+// Rule is a named check over an extracted command or code segment.
 type Rule struct {
-	Name    string
-	Pattern *regexp.Regexp
+	// Name identifies the rule in audit records.
+	Name string
+	// Severity is the action taken when the rule matches.
+	Severity Severity
+	// Description explains, in operator language, why this is dangerous.
+	Description string
+	// MatchCommand inspects a lexed command. Either this or MatchSegment is set.
+	MatchCommand func(Command) bool
+	// MatchSegment inspects raw segment text, for rules that are not about a
+	// single command — SQL statements and fork bombs.
+	MatchSegment func(Segment) bool
 }
 
 // Verdict is the result of inspecting a span of model output.
 type Verdict struct {
+	// Blocked is true when a block-severity rule fired. It is the field the
+	// streaming path and the response handler act on.
 	Blocked bool
-	Rule    string // name of the rule that fired
-	Match   string // the offending substring (for audit logs)
+	// Rule is the name of the highest-severity rule that fired.
+	Rule string
+	// Match is the offending text, for audit logs.
+	Match string
+	// Severity is the highest severity observed.
+	Severity Severity
+	// Reason explains the verdict to the operator.
+	Reason string
+	// Findings lists every rule that fired, including warnings.
+	Findings []Finding
+}
+
+// Finding is one rule match.
+type Finding struct {
+	Rule        string   `json:"rule"`
+	Severity    string   `json:"severity"`
+	Match       string   `json:"match"`
+	Description string   `json:"description"`
+	Scope       string   `json:"scope"`
+	Argv        []string `json:"argv,omitempty"`
 }
 
 // Guard inspects text and decides whether it is safe to emit.
@@ -30,7 +118,8 @@ type Guard interface {
 
 // RuleGuard is the default deterministic Guard.
 type RuleGuard struct {
-	rules []Rule
+	rules     []Rule
+	overrides map[string]Severity
 }
 
 // NewGuard returns a RuleGuard loaded with DefaultRules.
@@ -39,47 +128,126 @@ func NewGuard() *RuleGuard { return &RuleGuard{rules: DefaultRules()} }
 // NewGuardWith returns a RuleGuard with a custom rule set (used in tests).
 func NewGuardWith(rules ...Rule) *RuleGuard { return &RuleGuard{rules: rules} }
 
-// Inspect returns the first rule that matches text.
-func (g *RuleGuard) Inspect(text string) Verdict {
-	for _, r := range g.rules {
-		if m := r.Pattern.FindString(text); m != "" {
-			return Verdict{Blocked: true, Rule: r.Name, Match: m}
-		}
+// WithOverrides returns a guard whose named rules use the given severities.
+// This is how an enterprise tunes the guard to its own risk appetite — raising
+// host_power_state to block in a change-controlled production environment, or
+// lowering sql_truncate to warn in a data-engineering context — without
+// forking the rule set.
+func (g *RuleGuard) WithOverrides(o map[string]Severity) *RuleGuard {
+	cp := &RuleGuard{rules: g.rules, overrides: map[string]Severity{}}
+	for k, v := range o {
+		cp.overrides[k] = v
 	}
-	return Verdict{}
+	return cp
 }
 
-// Rules exposes the configured rules (for introspection/debug).
+// severityOf returns the effective severity for a rule.
+func (g *RuleGuard) severityOf(r Rule) Severity {
+	if g.overrides != nil {
+		if s, ok := g.overrides[r.Name]; ok {
+			return s
+		}
+	}
+	return r.Severity
+}
+
+// Inspect evaluates every rule against the executable parts of text and returns
+// the aggregate verdict.
+func (g *RuleGuard) Inspect(text string) Verdict {
+	segs := extractExecutable(text)
+	if len(segs) == 0 {
+		return Verdict{}
+	}
+
+	var v Verdict
+	for _, seg := range segs {
+		cmds := splitCommands(seg.Text)
+		for _, r := range g.rules {
+			sev := g.severityOf(r)
+			if sev == SeverityInfo && r.Severity == SeverityInfo {
+				// Still record info findings; they are useful in audit.
+			}
+			if r.MatchSegment != nil && r.MatchSegment(seg) {
+				v.add(Finding{
+					Rule: r.Name, Severity: sev.String(), Match: trim(seg.Text),
+					Description: r.Description, Scope: scopeName(seg.Scope),
+				}, sev)
+			}
+			if r.MatchCommand == nil {
+				continue
+			}
+			for _, c := range cmds {
+				if r.MatchCommand(c) {
+					v.add(Finding{
+						Rule: r.Name, Severity: sev.String(), Match: trim(c.Raw),
+						Description: r.Description, Scope: scopeName(seg.Scope), Argv: c.Argv,
+					}, sev)
+				}
+			}
+		}
+	}
+
+	sort.SliceStable(v.Findings, func(i, j int) bool {
+		return severityRank(v.Findings[i].Severity) > severityRank(v.Findings[j].Severity)
+	})
+	return v
+}
+
+func (v *Verdict) add(f Finding, sev Severity) {
+	for _, existing := range v.Findings {
+		if existing.Rule == f.Rule && existing.Match == f.Match {
+			return // same rule, same text: report once
+		}
+	}
+	v.Findings = append(v.Findings, f)
+	if sev > v.Severity || v.Rule == "" {
+		v.Severity = sev
+		v.Rule = f.Rule
+		v.Match = f.Match
+		v.Reason = f.Description
+	}
+	if sev >= SeverityBlock {
+		v.Blocked = true
+	}
+}
+
+// Rules exposes the configured rules for introspection and the /rules endpoint.
 func (g *RuleGuard) Rules() []Rule { return g.rules }
 
-// DefaultRules is PhiGate's baseline destructive-command deny list. It is not
-// exhaustive — it targets unambiguously catastrophic operations that should
-// never be auto-executed against production infrastructure.
-func DefaultRules() []Rule {
-	return []Rule{
-		// Recursive force delete: rm -rf / rm -fr (flags combined).
-		{"rm_recursive_force", regexp.MustCompile(`(?i)\brm\s+(?:-[\w-]+\s+)*-[\w]*(?:rf|fr)[\w]*`)},
-		// Recursive + force expressed as separate flags / long options.
-		{"rm_recursive_force_split", regexp.MustCompile(`(?i)\brm\s+(?:-{1,2}[\w-]+\s+)*--?r(?:ecursive)?\b.*--?f(?:orce)?\b`)},
-		// Filesystem creation over an existing device.
-		{"mkfs", regexp.MustCompile(`(?i)\bmkfs(?:\.\w+)?\s+/dev/`)},
-		// Raw disk overwrite.
-		{"dd_to_device", regexp.MustCompile(`(?i)\bdd\b[^\n]*\bof=/dev/`)},
-		// Redirect into a block device.
-		{"write_block_device", regexp.MustCompile(`>\s*/dev/(?:sd|nvme|hd|vd|mmcblk)`)},
-		// Classic fork bomb.
-		{"fork_bomb", regexp.MustCompile(`:\s*\(\s*\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:`)},
-		// Recursive chmod/chown rooted at /.
-		{"recursive_perm_root", regexp.MustCompile(`(?i)\bch(?:mod|own)\s+(?:-[\w-]+\s+)*-[\w]*R[\w]*\s+\S+\s+/(?:\s|$)`)},
-		// Pipe a download straight into a shell.
-		{"pipe_to_shell", regexp.MustCompile(`(?i)\b(?:curl|wget)\b[^\n|]*\|\s*(?:sudo\s+)?(?:ba|z|d)?sh\b`)},
-		// Host power state changes.
-		{"host_power_state", regexp.MustCompile(`(?i)\b(?:shutdown|reboot|poweroff|halt)\b|\binit\s+0\b`)},
-		// Destructive SQL.
-		{"sql_drop", regexp.MustCompile(`(?i)\bdrop\s+(?:table|database|schema)\b`)},
-		{"sql_truncate", regexp.MustCompile(`(?i)\btruncate\s+table\b`)},
-		// Wipe-all operations on orchestration/firewall state.
-		{"kubectl_delete_all", regexp.MustCompile(`(?i)\bkubectl\s+delete\b[^\n]*--all\b`)},
-		{"iptables_flush", regexp.MustCompile(`(?i)\biptables\s+-F\b`)},
+// Describe renders the effective rule set, so operators can see what is enforced.
+func (g *RuleGuard) Describe() []string {
+	out := make([]string, 0, len(g.rules))
+	for _, r := range g.rules {
+		out = append(out, fmt.Sprintf("%s=%s", r.Name, g.severityOf(r)))
 	}
+	sort.Strings(out)
+	return out
+}
+
+func severityRank(s string) int {
+	switch s {
+	case "block":
+		return 2
+	case "warn":
+		return 1
+	}
+	return 0
+}
+
+func scopeName(s Scope) string {
+	switch s {
+	case ScopeCode:
+		return "code"
+	case ScopeCommandLine:
+		return "command_line"
+	}
+	return "prose"
+}
+
+func trim(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) > 200 {
+		return s[:200] + "…"
+	}
+	return s
 }

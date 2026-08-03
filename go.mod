@@ -1,4 +1,4 @@
-module github.com/tenkan/phigate
+module github.com/phigate/phigate
 
 go 1.23
 

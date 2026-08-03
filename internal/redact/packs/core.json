@@ -1,0 +1,83 @@
+{
+  "name": "core",
+  "description": "Infrastructure topology, identifiers and timestamps. These are the high-cardinality values that dominate AIOps token cost; masking them is as much a compression win as a privacy one.",
+  "rules": [
+    {
+      "name": "email",
+      "category": "pii",
+      "priority": 80,
+      "pattern": "\\b[A-Za-z0-9._%+\\-]+@[A-Za-z0-9.\\-]+\\.[A-Za-z]{2,}\\b",
+      "description": "email address (personal data under APPI and GDPR)"
+    },
+    {
+      "name": "mac_address",
+      "category": "network",
+      "priority": 68,
+      "pattern": "\\b(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}\\b",
+      "description": "MAC address"
+    },
+    {
+      "name": "ipv6",
+      "category": "network",
+      "priority": 67,
+      "pattern": "\\b(?:[0-9A-Fa-f]{1,4}:){2,7}[0-9A-Fa-f]{1,4}\\b",
+      "description": "IPv6 address (loose form)"
+    },
+    {
+      "name": "ipv4",
+      "category": "network",
+      "priority": 66,
+      "pattern": "\\b\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}(?::\\d{1,5})?\\b",
+      "description": "IPv4 address, optionally with port"
+    },
+    {
+      "name": "url",
+      "category": "network",
+      "priority": 62,
+      "pattern": "\\bhttps?://[^\\s\"'<>]+",
+      "description": "HTTP(S) URL"
+    },
+    {
+      "name": "uuid",
+      "category": "identifier",
+      "priority": 50,
+      "pattern": "\\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\\b",
+      "description": "UUID v1-v5"
+    },
+    {
+      "name": "timestamp_iso8601",
+      "category": "temporal",
+      "priority": 46,
+      "pattern": "\\b\\d{4}-\\d{2}-\\d{2}[T ]\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-]\\d{2}:?\\d{2})?\\b",
+      "description": "ISO-8601 timestamp"
+    },
+    {
+      "name": "timestamp_syslog",
+      "category": "temporal",
+      "priority": 45,
+      "pattern": "\\b[A-Z][a-z]{2}\\s+\\d{1,2}\\s+\\d{2}:\\d{2}:\\d{2}\\b",
+      "description": "syslog timestamp, e.g. 'Jun 29 15:04:05'"
+    },
+    {
+      "name": "hex_blob",
+      "category": "identifier",
+      "priority": 30,
+      "pattern": "\\b[0-9a-fA-F]{16,}\\b",
+      "description": "long hex run: hash, checksum or opaque identifier"
+    },
+    {
+      "name": "large_integer",
+      "category": "identifier",
+      "priority": 20,
+      "pattern": "\\b\\d{4,}",
+      "description": "standalone integer of 4+ digits: ids, counters, byte counts"
+    },
+    {
+      "name": "unix_path",
+      "category": "path",
+      "priority": 10,
+      "pattern": "(?:/[A-Za-z0-9._\\-]+){2,}/?",
+      "description": "absolute unix path with at least two segments. Deliberately the lowest-priority rule: it overlaps almost everything, and before single-pass overlap resolution it used to corrupt credentials by eating their middle."
+    }
+  ]
+}

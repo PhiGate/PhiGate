@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="refresh" content="15">
+<title>PhiGate — operations</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --line: #262b36; --fg: #e6e9ef;
+    --muted: #8b93a7; --accent: #4fd1c5; --warn: #f6ad55; --danger: #fc8181;
+    --ok: #68d391;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f6f7f9; --panel: #ffffff; --line: #e2e5ea; --fg: #1a202c;
+      --muted: #5f6673; --accent: #2c7a7b; --warn: #b7791f; --danger: #c53030;
+      --ok: #276749;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 2rem 1.25rem; background: var(--bg); color: var(--fg);
+    font: 15px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI",
+          "Hiragino Kaku Gothic ProN", "Noto Sans JP", sans-serif;
+  }
+  .wrap { max-width: 1100px; margin: 0 auto; }
+  header { display: flex; align-items: baseline; gap: 1rem; flex-wrap: wrap;
+           border-bottom: 1px solid var(--line); padding-bottom: 1rem; }
+  h1 { font-size: 1.35rem; margin: 0; letter-spacing: -0.01em; }
+  h1 span { color: var(--accent); }
+  .sub { color: var(--muted); font-size: 0.85rem; }
+  .grid { display: grid; gap: 1rem; margin-top: 1.5rem;
+          grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
+  .card { background: var(--panel); border: 1px solid var(--line);
+          border-radius: 10px; padding: 1rem 1.1rem; }
+  .card h2 { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.08em;
+             color: var(--muted); margin: 0 0 0.6rem; font-weight: 600; }
+  .big { font-size: 1.9rem; font-weight: 650; letter-spacing: -0.02em;
+         font-variant-numeric: tabular-nums; }
+  .unit { font-size: 0.8rem; color: var(--muted); margin-left: 0.25rem; }
+  .row { display: flex; justify-content: space-between; gap: 1rem;
+         padding: 0.3rem 0; font-size: 0.9rem; }
+  .row + .row { border-top: 1px dashed var(--line); }
+  .row span:last-child { font-variant-numeric: tabular-nums; color: var(--muted); }
+  .bar { display: flex; height: 8px; border-radius: 999px; overflow: hidden;
+         background: var(--line); margin-top: 0.6rem; }
+  .bar i { display: block; height: 100%; }
+  .legend { display: flex; gap: 0.9rem; flex-wrap: wrap; margin-top: 0.55rem;
+            font-size: 0.78rem; color: var(--muted); }
+  .legend b { font-weight: 600; color: var(--fg); }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+         margin-right: 0.35rem; vertical-align: middle; }
+  .wide { grid-column: 1 / -1; }
+  .tags { display: flex; flex-wrap: wrap; gap: 0.35rem; margin-top: 0.2rem; }
+  .tag { font-size: 0.74rem; padding: 0.15rem 0.5rem; border-radius: 5px;
+         border: 1px solid var(--line); color: var(--muted);
+         font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .tag.block { color: var(--danger); border-color: var(--danger); }
+  .tag.warn { color: var(--warn); border-color: var(--warn); }
+  .note { margin-top: 1.5rem; padding: 0.85rem 1rem; border-radius: 8px;
+          border: 1px solid var(--warn); color: var(--warn); font-size: 0.85rem; }
+  .ok { color: var(--ok); } .warnc { color: var(--warn); } .bad { color: var(--danger); }
+  footer { margin-top: 2rem; color: var(--muted); font-size: 0.78rem;
+           border-top: 1px solid var(--line); padding-top: 0.9rem; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.85em; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>Phi<span>Gate</span></h1>
+  <div class="sub">uptime {{.Uptime}} · {{.Sessions}} active sessions · refreshed {{.Generated}}</div>
+</header>
+
+<div class="grid">
+
+  <div class="card">
+    <h2>Spend avoided</h2>
+    <div class="big">{{.SavingsPct}}<span class="unit">%</span></div>
+    <div class="row"><span>Saved</span><span>{{printf "%.4f" .Totals.CostSaved}} {{.Currency}}</span></div>
+    <div class="row"><span>Cloud spend</span><span>{{printf "%.4f" .Totals.CloudCost}} {{.Currency}}</span></div>
+    <div class="row"><span>Baseline</span><span>{{printf "%.4f" .Totals.BaselineCost}} {{.Currency}}</span></div>
+  </div>
+
+  <div class="card">
+    <h2>Tokens avoided</h2>
+    <div class="big">{{.Totals.TokensSaved}}</div>
+    <div class="row"><span>Baseline prompt</span><span>{{.Totals.BaselineTokens}}</span></div>
+    <div class="row"><span>Actually sent</span><span>{{.Totals.PromptTokens}}</span></div>
+    <div class="row"><span>Completion</span><span>{{.Totals.CompletionTokens}}</span></div>
+  </div>
+
+  <div class="card">
+    <h2>Template cache</h2>
+    <div class="big">{{.CacheHitPct}}<span class="unit">% hit</span></div>
+    <div class="row"><span>Hits / misses</span><span>{{.Cache.Hits}} / {{.Cache.Misses}}</span></div>
+    <div class="row"><span>Entries</span><span>{{.Cache.Entries}} / {{.Cache.Capacity}}</span></div>
+    <div class="row"><span>Tokens avoided</span><span>{{.Cache.TokensAvoided}}</span></div>
+  </div>
+
+  <div class="card">
+    <h2>Backends</h2>
+    {{range $name, $state := .Backends}}
+    <div class="row"><span>{{$name}}</span><span>{{$state}}</span></div>
+    {{end}}
+    <div class="row"><span>Audit log</span>
+      <span class="{{if .AuditEnabled}}ok{{else}}bad{{end}}">
+        {{if .AuditEnabled}}enabled{{else}}DISABLED{{end}}</span></div>
+  </div>
+
+  <div class="card wide">
+    <h2>Where requests were served</h2>
+    <div class="bar">
+      <i style="width:{{.LocalPct}}%;background:var(--ok)"></i>
+      <i style="width:{{.CachePct}}%;background:var(--accent)"></i>
+      <i style="width:{{.CloudPct}}%;background:var(--warn)"></i>
+    </div>
+    <div class="legend">
+      <span><i class="dot" style="background:var(--ok)"></i>local <b>{{.Totals.LocalRequests}}</b> ({{.LocalPct}}%)</span>
+      <span><i class="dot" style="background:var(--accent)"></i>cache <b>{{.Totals.CacheHits}}</b> ({{.CachePct}}%)</span>
+      <span><i class="dot" style="background:var(--warn)"></i>cloud <b>{{.Totals.CloudRequests}}</b> ({{.CloudPct}}%)</span>
+      <span>total <b>{{.Totals.Requests}}</b></span>
+    </div>
+  </div>
+
+  <div class="card wide">
+    <h2>Egress policy</h2>
+    <div><code>{{.Policy}}</code></div>
+  </div>
+
+  <div class="card wide">
+    <h2>Egress guard rules ({{len .GuardRules}})</h2>
+    <div class="tags">
+      {{range .GuardRules}}<span class="tag">{{.}}</span>{{end}}
+    </div>
+  </div>
+
+  <div class="card wide">
+    <h2>Redaction rules ({{len .RedactRules}})</h2>
+    <div class="tags">
+      {{range .RedactRules}}<span class="tag">{{.}}</span>{{end}}
+    </div>
+  </div>
+
+</div>
+
+{{if .DebugOn}}
+<div class="note">
+  <strong>PHIGATE_DEBUG is enabled.</strong>
+  <code>/debug/compress</code> returns the plaintext of every masked value.
+  This must be off in production.
+</div>
+{{end}}
+
+{{if gt .Totals.EstimatedRequests 0}}
+<div class="note">
+  {{.Totals.EstimatedRequests}} of {{.Totals.Requests}} requests were accounted with
+  <em>estimated</em> token counts because the provider reported no usage block.
+  Those figures are approximate; requests with provider usage are exact.
+</div>
+{{end}}
+
+<footer>
+  PhiGate — SLM gateway for enterprise token optimisation and local security.
+  Machine-readable equivalents: <code>/v1/phigate/stats</code>, <code>/metrics</code>.
+</footer>
+
+</div>
+</body>
+</html>

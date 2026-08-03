@@ -1,0 +1,88 @@
+{
+  "name": "jp",
+  "description": "Japan-specific personal data. PhiGate's primary market is Japanese enterprises, where 個人番号 (My Number) is 特定個人情報 under the My Number Act and carries handling obligations far stricter than ordinary PII. Rules that need one are backed by their official check digit so a broad digit pattern can be used without flooding the dictionary.",
+  "rules": [
+    {
+      "name": "credit_card",
+      "category": "pii",
+      "priority": 88,
+      "validator": "luhn",
+      "pattern": "\\b(?:\\d[ \\-]?){12,18}\\d\\b",
+      "description": "payment card number, confirmed by Luhn checksum"
+    },
+    {
+      "name": "jp_mynumber",
+      "category": "pii",
+      "priority": 86,
+      "validator": "jp_mynumber",
+      "pattern": "\\b\\d{4}[ \\-]?\\d{4}[ \\-]?\\d{4}\\b",
+      "description": "個人番号 / マイナンバー (Individual Number), confirmed by its official check digit"
+    },
+    {
+      "name": "jp_corporate_number",
+      "category": "pii",
+      "priority": 85,
+      "validator": "jp_corporate_no",
+      "pattern": "\\b\\d{13}\\b",
+      "description": "法人番号 (Corporate Number), confirmed by its check digit"
+    },
+    {
+      "name": "jp_passport",
+      "category": "pii",
+      "priority": 84,
+      "pattern": "\\b[A-Z]{2}\\d{7}\\b",
+      "description": "Japanese passport number (two letters + seven digits)"
+    },
+    {
+      "name": "jp_phone_intl",
+      "category": "pii",
+      "priority": 83,
+      "pattern": "\\+81[ \\-]?\\d{1,4}[ \\-]?\\d{1,4}[ \\-]?\\d{4}\\b",
+      "description": "Japanese phone number in international format"
+    },
+    {
+      "name": "jp_phone_mobile",
+      "category": "pii",
+      "priority": 82,
+      "pattern": "\\b0[789]0[ \\-]?\\d{4}[ \\-]?\\d{4}\\b",
+      "description": "Japanese mobile number (070/080/090)"
+    },
+    {
+      "name": "jp_phone_landline",
+      "category": "pii",
+      "priority": 81,
+      "pattern": "\\b0\\d{1,4}[ \\-]\\d{1,4}[ \\-]\\d{4}\\b",
+      "description": "Japanese landline number with separators"
+    },
+    {
+      "name": "jp_postal_code",
+      "category": "pii",
+      "priority": 80,
+      "pattern": "〒\\s*\\d{3}[ \\-]?\\d{4}",
+      "description": "Japanese postal code carrying the 〒 marker"
+    },
+    {
+      "name": "jp_address",
+      "category": "pii",
+      "priority": 79,
+      "pattern": "(?:北海道|青森県|岩手県|宮城県|秋田県|山形県|福島県|茨城県|栃木県|群馬県|埼玉県|千葉県|東京都|神奈川県|新潟県|富山県|石川県|福井県|山梨県|長野県|岐阜県|静岡県|愛知県|三重県|滋賀県|京都府|大阪府|兵庫県|奈良県|和歌山県|鳥取県|島根県|岡山県|広島県|山口県|徳島県|香川県|愛媛県|高知県|福岡県|佐賀県|長崎県|熊本県|大分県|宮崎県|鹿児島県|沖縄県)[^\\s、。，,]{0,40}",
+      "description": "Japanese street address, anchored on a prefecture name"
+    },
+    {
+      "name": "jp_postal_code_bare",
+      "category": "pii",
+      "priority": 78,
+      "disabled": true,
+      "pattern": "\\b\\d{3}-\\d{4}\\b",
+      "description": "Japanese postal code without the 〒 marker. Disabled by default: the pattern is indistinguishable from ordinary hyphenated numbers in logs. Enable it for payloads known to contain customer records."
+    },
+    {
+      "name": "jp_name_kanji",
+      "category": "pii",
+      "priority": 77,
+      "disabled": true,
+      "pattern": "(?:氏名|お名前|担当者|申請者)\\s*[:：]\\s*\\S{2,20}",
+      "description": "personal name following an explicit Japanese label. Disabled by default because free-form kanji names cannot be detected reliably by pattern alone; enable it when processing forms or ticket exports."
+    }
+  ]
+}

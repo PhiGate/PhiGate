@@ -1,0 +1,29 @@
+{
+  "_comment": [
+    "Example PhiGate price book, in Japanese yen.",
+    "",
+    "Published list prices in USD are rarely what an enterprise actually pays:",
+    "Azure commitments, enterprise agreements and reseller contracts all differ.",
+    "Reporting savings at list price in a foreign currency is the fastest way to",
+    "have a finance team dismiss the number entirely.",
+    "",
+    "Point PHIGATE_PRICE_BOOK at a file like this so /v1/phigate/stats and the",
+    "dashboard report in the currency and at the rates your CFO recognises.",
+    "",
+    "local_per_million is the amortised cost of self-hosted inference. Leave it",
+    "at 0 to treat the marginal cost of an already-running Ollama as free, or",
+    "set it to (GPU hourly cost x hours) / (tokens served) for a fully-loaded",
+    "figure."
+  ],
+  "currency": "JPY",
+  "local_per_million": 0,
+  "prices": [
+    { "model": "gpt-4o-mini",       "input_per_million": 23,   "output_per_million": 90 },
+    { "model": "gpt-4o",            "input_per_million": 375,  "output_per_million": 1500 },
+    { "model": "gpt-4.1-mini",      "input_per_million": 60,   "output_per_million": 240 },
+    { "model": "gpt-4.1",           "input_per_million": 300,  "output_per_million": 1200 },
+    { "model": "claude-sonnet-4",   "input_per_million": 450,  "output_per_million": 2250 },
+    { "model": "claude-opus-4",     "input_per_million": 2250, "output_per_million": 11250 },
+    { "model": "gemini-2.0-flash",  "input_per_million": 15,   "output_per_million": 60 }
+  ]
+}

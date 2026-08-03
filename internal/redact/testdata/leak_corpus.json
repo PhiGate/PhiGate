@@ -1,0 +1,137 @@
+{
+  "_comment": [
+    "The leak corpus is PhiGate's privacy proof.",
+    "",
+    "Each case carries a payload plus the exact substrings that must NOT survive",
+    "redaction. TestLeakCorpus asserts that none of them appear in the redacted",
+    "output. If someone loosens a rule, reorders priorities, or reintroduces the",
+    "sequential-regex bug that used to corrupt overlapping matches, this fails.",
+    "",
+    "'must_survive' pins the opposite property: text that must NOT be masked, so",
+    "the corpus also guards against a rule becoming so broad it destroys the",
+    "operator's actual question."
+  ],
+
+  "_secrets_note": [
+    "Every credential below is synthetic and has never been issued. Even so, they",
+    "are stored as FRAGMENTS and joined at load time, so no credential-shaped",
+    "literal ever exists in a file in this repository.",
+    "",
+    "That is not cosmetic. A test fixture that looks like a live Slack token is",
+    "indistinguishable from one to a secret scanner: GitHub push protection blocks",
+    "the push, and gitleaks/trufflehog fail the CI of anyone who forks this repo.",
+    "A corpus that cannot be committed is a corpus nobody runs, and this one is the",
+    "evidence behind PhiGate's central privacy claim — it has to stay runnable.",
+    "",
+    "Reference a fragment set from a payload or a must_not_leak entry as ${name}.",
+    "TestNoLiteralCredentialsInCorpus enforces the rule for future contributors.",
+    "",
+    "AWS's values are the ones published in AWS's own documentation and are",
+    "allowlisted by every scanner, but they are fragmented too so the rule stays",
+    "simple: no exceptions, nothing to judge case by case."
+  ],
+  "synthetic_secrets": {
+    "aws_key_id":       ["AKIA", "IOSFODNN", "7EXAMPLE"],
+    "aws_secret":       ["wJalrXUtnFEMI/", "K7MDENG/", "bPxRfiCYEXAMPLEKEY"],
+    "github_token":     ["ghp", "_16CharsAndThenSome", "MoreABCDEFGHIJKL"],
+    "slack_token":      ["xox", "b-2444556677-", "8899001122-", "AbCdEfGhIjKlMnOpQrSt"],
+    "llm_key":          ["sk-", "proj-abc123DEF456", "ghi789JKL012mno345PQR"],
+    "azure_key":        ["Zm9vYmFyYmF6cXV4", "Y29ycGFzc3dvcmQx", "MjM0NTY3ODkw=="],
+    "jwt_header":       ["eyJhbGciOiJIUzI1NiIs", "InR5cCI6IkpXVCJ9"],
+    "jwt_payload":      ["eyJzdWIiOiIxMjM0NTY3ODkwIiwi", "bmFtZSI6IlRhcm8gWWFtYWRhIn0"],
+    "jwt_signature":    ["dozjgNryP4J3jVmNHl0w5N", "_XgL0n3I9PlFUP0THsR8U"],
+    "pem_body":         ["MIIEowIBAAKCAQEA3Tz2mr7SZiAMfQyuvBjM9OiJjRazXBZ1BjP5CE/", "Wm/Rr500P"],
+    "db_password":      ["Hx7!kQ", "2mZp"],
+    "config_password":  ["Tr0ub4", "dor&3"],
+    "config_api_key":   ["9f8e7d6c5b4a", "39281706abcdef012345"],
+    "config_secret":    ["Zm9vYmFyYmF6cXV4", "Y29ycA=="],
+    "session_cookie":   ["k3JqZ8vN2pXwT7bR5yL1", "cM9fH4dG6sA0eU8iO2nP4zQ"]
+  },
+
+  "cases": [
+    {
+      "name": "aws_credentials_in_env_dump",
+      "payload": "env | grep AWS\nAWS_ACCESS_KEY_ID=${aws_key_id}\nAWS_SECRET_ACCESS_KEY=${aws_secret}\nAWS_REGION=ap-northeast-1",
+      "must_not_leak": ["${aws_key_id}", "${aws_secret}"],
+      "must_survive": ["AWS_REGION"],
+      "why": "The original sequential-regex masker let the unix_path rule eat the middle of the secret key, emitting a partially masked value that looked safe."
+    },
+    {
+      "name": "database_connection_string",
+      "payload": "FATAL: could not connect to postgres://svc_billing:${db_password}@db-01.internal.corp:5432/billing",
+      "must_not_leak": ["${db_password}"],
+      "why": "Passwords embedded in DSNs are the most common credential in a real stack trace."
+    },
+    {
+      "name": "kv_secrets_in_config",
+      "payload": "spring.datasource.password=${config_password}\napi_key: ${config_api_key}\nclient_secret = \"${config_secret}\"\nnotes: rotate quarterly",
+      "must_not_leak": ["${config_password}", "${config_api_key}", "${config_secret}"],
+      "must_survive": ["rotate quarterly"],
+      "why": "key=value credentials in application config pasted into a prompt."
+    },
+    {
+      "name": "pem_private_key",
+      "payload": "deploy failed, key is:\n-----BEGIN RSA PRIVATE KEY-----\n${pem_body}\nRK+Lh9x5eJPo5CAZ3/ANBE0sTK0ZsDGMak2m1g7oruI3dY3VHqIxFTz0Ta1d+NAj\n-----END RSA PRIVATE KEY-----\nany ideas?",
+      "must_not_leak": ["${pem_body}", "BEGIN RSA PRIVATE KEY"],
+      "must_survive": ["deploy failed", "any ideas?"],
+      "why": "A whole PEM block must go, not just the base64 lines."
+    },
+    {
+      "name": "jwt_in_request_log",
+      "payload": "401 for Authorization: Bearer ${jwt_header}.${jwt_payload}.${jwt_signature}",
+      "must_not_leak": ["${jwt_header}", "${jwt_payload}"],
+      "why": "A JWT payload is only base64; leaking one discloses every claim, here a person's name."
+    },
+    {
+      "name": "github_and_slack_tokens",
+      "payload": "CI broke. GITHUB_TOKEN=${github_token} and slack hook token ${slack_token}",
+      "must_not_leak": ["${github_token}", "${slack_token}"],
+      "why": "SaaS tokens pasted from CI logs."
+    },
+    {
+      "name": "llm_provider_key",
+      "payload": "gateway upstream rejected our key ${llm_key}",
+      "must_not_leak": ["${llm_key}"],
+      "why": "PhiGate proxies these keys itself; one leaking through a prompt compromises the gateway's own upstream account."
+    },
+    {
+      "name": "jp_mynumber_in_ticket",
+      "payload": "問い合わせ: 従業員の個人番号 1234 5678 9018 が給与システムに登録できません。",
+      "must_not_leak": ["1234 5678 9018"],
+      "must_survive": ["給与システム"],
+      "why": "特定個人情報 under the My Number Act. This must never reach a cloud LLM under any routing decision."
+    },
+    {
+      "name": "jp_customer_record",
+      "payload": "顧客: 〒100-0001 東京都千代田区千代田1-1 電話 090-1234-5678 メール taro@example.co.jp カード 4111-1111-1111-1111",
+      "must_not_leak": ["〒100-0001", "090-1234-5678", "taro@example.co.jp", "4111-1111-1111-1111", "東京都千代田区千代田1-1"],
+      "why": "A full Japanese customer record: postal code, address, phone, email and a Luhn-valid card. These are the universally-published test values, not fragments, because no scanner treats them as live credentials."
+    },
+    {
+      "name": "internal_topology",
+      "payload": "upstream timeout: prod-db-tokyo-01.internal.corp (10.24.8.19) -> api-gw-02.internal.corp",
+      "must_not_leak": ["prod-db-tokyo-01.internal.corp", "10.24.8.19", "api-gw-02.internal.corp"],
+      "must_survive": ["upstream timeout"],
+      "why": "Internal hostnames disclose topology more usefully to an attacker than the IPs do. Requires PHIGATE_INTERNAL_DOMAINS to be configured; the corpus runs the engine with corp/internal set."
+    },
+    {
+      "name": "unknown_bespoke_token",
+      "payload": "session rejected, cookie SID=${session_cookie} expired",
+      "must_not_leak": ["${session_cookie}"],
+      "why": "No shipped pattern knows this format. The entropy detector is the safety net beneath the rules."
+    },
+    {
+      "name": "azure_storage_connection_string",
+      "payload": "blob upload failed: DefaultEndpointsProtocol=https;AccountName=prodlogs;AccountKey=${azure_key};EndpointSuffix=core.windows.net",
+      "must_not_leak": ["${azure_key}"],
+      "why": "Azure connection strings are pasted constantly in JP enterprise support tickets."
+    },
+    {
+      "name": "clean_ops_question",
+      "payload": "nginx worker processes keep restarting after we enabled gzip. Where should I look first?",
+      "must_not_leak": [],
+      "must_survive": ["nginx worker processes", "enabled gzip", "Where should I look first?"],
+      "why": "The inverse property: an ordinary operator question must pass through untouched. A rule set that masks this destroys answer quality."
+    }
+  ]
+}

@@ -12,6 +12,7 @@ package router
 import (
 	"context"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -76,10 +77,10 @@ func (r *HeuristicRouter) Route(_ context.Context, compressed string) (Decision,
 	// 2. Large or multi-template payloads imply a multi-component anomaly.
 	lines := nonEmptyLines(trimmed)
 	if len(lines) > r.maxLocalLines {
-		return Decision{TargetCloud, "multi-template payload (" + itoa(len(lines)) + " lines)"}, nil
+		return Decision{TargetCloud, "multi-template payload (" + strconv.Itoa(len(lines)) + " lines)"}, nil
 	}
 	if runes := len([]rune(trimmed)); runes > r.maxLocalRunes {
-		return Decision{TargetCloud, "large payload (" + itoa(runes) + " runes)"}, nil
+		return Decision{TargetCloud, "large payload (" + strconv.Itoa(runes) + " runes)"}, nil
 	}
 
 	// 3. A recognised simple infra error on a small payload -> local SLM.
@@ -100,19 +101,4 @@ func nonEmptyLines(s string) []string {
 		}
 	}
 	return out
-}
-
-// itoa avoids a strconv import for one tiny call site.
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	var buf [20]byte
-	i := len(buf)
-	for n > 0 {
-		i--
-		buf[i] = byte('0' + n%10)
-		n /= 10
-	}
-	return string(buf[i:])
 }

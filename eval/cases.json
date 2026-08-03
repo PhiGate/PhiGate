@@ -1,0 +1,69 @@
+{
+  "_comment": [
+    "Golden cases for `phigate-eval eval`.",
+    "",
+    "Each case is a realistic AIOps question plus a rubric describing what a",
+    "correct answer contains. The harness answers each case twice — once raw",
+    "against the cloud model, once through PhiGate — and has a judge model score",
+    "both against the rubric. The output is a quality-versus-savings table.",
+    "",
+    "Cases deliberately include the payloads PhiGate finds hardest: high",
+    "placeholder density (does the model still reason when every value is <V*>?),",
+    "AST-pruned code (does structure alone suffice?), and Japanese text (does",
+    "compression behave on CJK?). A benchmark that only contains easy cases",
+    "proves nothing.",
+    "",
+    "Extend this file with cases drawn from your own ticket history: the number",
+    "that convinces your own organisation is the one measured on your own traffic."
+  ],
+  "cases": [
+    {
+      "name": "nginx-upstream-timeout",
+      "category": "single-component",
+      "prompt": "2026-06-29T15:04:05Z [error] 1234#0: *5678 upstream timed out (110: Connection timed out) while reading response header from upstream, client: 203.0.113.44, server: api.example.com, request: \"GET /v1/orders HTTP/1.1\", upstream: \"http://10.24.8.19:8080/v1/orders\", host: \"api.example.com\"\n\nThis started 20 minutes ago and affects about 5% of requests. What should I check first?",
+      "rubric": "Identifies an upstream/backend latency problem rather than an nginx fault; suggests checking the upstream service's own latency and saturation, connection pool or worker exhaustion, and proxy_read_timeout; recommends correlating the 5% figure with a specific upstream instance."
+    },
+    {
+      "name": "oomkilled-pod",
+      "category": "single-component",
+      "prompt": "Pod checkout-api-7d9f8b6c4-x2k9p was OOMKilled 4 times in the last hour. Limits: memory 512Mi, requests 256Mi. The container is a JVM service. Node has 12Gi free. What is going on and what do I change?",
+      "rubric": "Recognises that a JVM in a container needs heap sized against the container limit; mentions -XX:MaxRAMPercentage or -Xmx, and that free node memory is irrelevant to a per-container limit; suggests raising the limit and/or tuning heap, and checking for a leak if restarts continue."
+    },
+    {
+      "name": "multi-component-cascade",
+      "category": "multi-component",
+      "prompt": "Between 14:02 and 14:19 we saw: (1) redis-01 evicting keys at 8000/s, (2) api-gateway 502 rate climbing to 30%, (3) postgres-primary connection count hitting max_connections=200, (4) checkout-api p99 latency 220ms -> 14s. Which is cause and which are symptoms?",
+      "rubric": "Reasons about ordering and causality rather than listing the events; proposes cache eviction as a plausible root cause driving load onto postgres, exhausting connections and cascading to gateway 502s; recommends confirming with the timeline and checking what changed in redis memory or key TTLs."
+    },
+    {
+      "name": "high-placeholder-density",
+      "category": "compression-stress",
+      "prompt": "Investigate: host 10.24.8.19 at 2026-06-29T15:04:05Z returned 503 for request 8f14e45f-ceea-467a-9f1e-2b6cd9e4b1a2 from client 198.51.100.7 after 15234ms, retried on 10.24.8.20 at 2026-06-29T15:04:21Z with request 3c9a1f2b-77d4-4a1e-b0f9-5d8e7c6a4b31 which returned 200 in 89ms. Same pattern 41 times in 10 minutes. What is the most likely cause?",
+      "rubric": "Notes that one specific host fails while its peer succeeds, pointing at an instance-level rather than service-level fault; suggests removing the bad instance from rotation and checking its health, resources, or a bad deploy. Must still reason correctly when every value is a placeholder."
+    },
+    {
+      "name": "code-connection-leak",
+      "category": "code",
+      "prompt": "Why does this leak connections?\n\nfunc handler(w http.ResponseWriter, r *http.Request) {\n    db, err := sql.Open(\"postgres\", dsn)\n    if err != nil {\n        http.Error(w, err.Error(), 500)\n        return\n    }\n    rows, _ := db.Query(\"SELECT id FROM orders WHERE user_id = $1\", r.URL.Query().Get(\"u\"))\n    for rows.Next() {\n        var id int\n        rows.Scan(&id)\n        fmt.Fprintln(w, id)\n    }\n}",
+      "rubric": "Identifies that sql.Open is called per request instead of once at startup, that the pool is never closed, and that rows is never closed; notes sql.DB is already a pool and should be a long-lived value; mentions defer rows.Close() and error handling on Query. Must remain correct after AST pruning strips literal values."
+    },
+    {
+      "name": "japanese-incident-ticket",
+      "category": "japanese",
+      "prompt": "【障害報告】決済システムで 2026-06-29 15:04 頃からタイムアウトが多発しています。エラーログには「connection refused」が 10.24.8.19 に対して記録されています。データベースサーバーの CPU 使用率は 20% 程度で正常です。アプリケーションサーバーは 3 台構成で、そのうち 1 台のみ症状が出ています。原因の切り分け方法を教えてください。",
+      "rubric": "Answers in Japanese; recognises that only one of three application servers is affected, so the fault is instance-local rather than in the database; suggests checking that instance's network path, connection pool state, file descriptors, and recent deployment differences; proposes removing it from the load balancer to confirm."
+    },
+    {
+      "name": "disk-full-remediation",
+      "category": "guardrail",
+      "prompt": "/var is 100% full on 10.24.8.19 and the service will not start. Give me the exact commands to fix it right now.",
+      "rubric": "Proposes investigation before deletion (du/ncdu to find the consumer, checking for deleted-but-open files with lsof); recommends log rotation or truncating specific known-safe logs rather than a blanket recursive delete of a system directory. An answer proposing rm -rf on /var should score poorly."
+    },
+    {
+      "name": "tls-cert-expiry",
+      "category": "single-component",
+      "prompt": "curl: (60) SSL certificate problem: certificate has expired — when calling https://api.internal.corp/v1/health from our batch job. The browser shows the cert as valid. What is different?",
+      "rubric": "Distinguishes the leaf certificate from the chain; raises an expired intermediate or missing chain served by the endpoint, a stale CA bundle on the batch host, or clock skew; suggests openssl s_client -showcerts to compare what the server actually sends against what the browser completes from cache."
+    }
+  ]
+}
