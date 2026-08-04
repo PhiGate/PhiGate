@@ -74,11 +74,18 @@ independently reproducible.
 
 // ---------------------------------------------------------------- bench
 
+// stageResult is one row of the bench table. The json tags matter: -json exists
+// to be piped into other tools, and emitting Go's exported field names would
+// make the schema an accident of the struct definition.
 type stageResult struct {
-	Stage      string
-	Tokens     int
-	Reduction  float64
-	Cumulative float64
+	Stage string `json:"stage"`
+	// Tokens remaining after this stage and everything before it.
+	Tokens int `json:"tokens"`
+	// Reduction is this stage's own contribution, as a percentage of what
+	// reached it.
+	Reduction float64 `json:"marginal_percent"`
+	// Cumulative is the total reduction against the raw input.
+	Cumulative float64 `json:"cumulative_percent"`
 }
 
 func runBench(args []string) error {

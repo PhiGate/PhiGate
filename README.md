@@ -43,6 +43,75 @@ distrusts.
 
 ---
 
+## Measured results
+
+Numbers below are from the **public [LogHub](https://github.com/logpai/loghub)
+corpora** — 15,994 lines of real system logs collected by researchers with no
+stake in PhiGate's figures. Reproduce them in two commands:
+
+```bash
+scripts/fetch-benchmark-corpus.sh
+./bin/phigate-eval bench -dir eval/corpus
+```
+
+| Dataset | Raw tokens | After pipeline | Reduction |
+|---|---:|---:|---:|
+| Apache | 72,346 | 335 | 99.5% |
+| OpenSSH | 87,540 | 538 | 99.4% |
+| Spark | 77,682 | 802 | 99.0% |
+| Zookeeper | 115,973 | 1,138 | 99.0% |
+| Linux | 88,563 | 950 | 98.9% |
+| BGL | 160,587 | 5,703 | 96.4% |
+| HDFS | 103,869 | 4,382 | 95.8% |
+| Thunderbird | 143,187 | 10,655 | 92.6% |
+| **All eight** | **849,747** | **24,503** | **97.1%** |
+
+**Read these with their caveats.** These are 2,000-line samples of highly
+repetitive machine logs — Drain's best case, and the traffic PhiGate is built
+for. A mixed workload with more prose and less repetition will land lower. The
+figure measures compression only; requests the router keeps local, and template
+cache hits, avoid 100% of cloud prompt cost rather than 97%.
+
+**Where the saving actually comes from — and doesn't.** Masking contributes
+between **−10% and +8%** depending on dataset. It sometimes makes prompts
+*larger*, because a distinct value replaced by a distinct `<V1234>` placeholder
+costs about what the value did. Essentially all reduction is Drain's. The masking
+stage is a privacy control whose contribution to cost is indirect: normalising
+values is what allows a thousand log lines to collapse into one template.
+
+We publish that because a compression stage that pays for itself only indirectly
+is exactly the detail a vendor is tempted to leave out.
+
+### Detection coverage on the same corpus
+
+```bash
+./bin/phigate-eval leak -dir eval/corpus
+```
+
+59,343 sensitive spans across the eight datasets: 391 credential-class
+(entropy-detected session tokens), 3 personal, 20,171 network, 3,694 path,
+35,084 identifier. Running this against **your own** logs before adopting
+PhiGate is the point of the tool.
+
+### Answer quality
+
+Not published yet — and deliberately not estimated. Measuring whether compression
+degrades answers requires sending each case to a real model twice, which needs
+API credentials and costs money, so it can only be run by someone with both:
+
+```bash
+./bin/phigate-eval eval -cases eval/cases.json \
+  -gateway http://localhost:8080/v1 -gateway-key <key> \
+  -baseline https://api.openai.com/v1 -baseline-key $OPENAI_API_KEY
+```
+
+It answers each case twice — once raw to the cloud model, once through PhiGate —
+and has a judge model score both against a rubric. A savings figure without a
+quality figure beside it is the number every buyer already distrusts, so treat
+the table above as incomplete until this one sits next to it.
+
+---
+
 ## Request path
 
 ```

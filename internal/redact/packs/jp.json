@@ -7,8 +7,8 @@
       "category": "pii",
       "priority": 88,
       "validator": "luhn",
-      "pattern": "\\b(?:\\d[ \\-]?){12,18}\\d\\b",
-      "description": "payment card number, confirmed by Luhn checksum"
+      "pattern": "\\b(?:\\d{13,19}|\\d{4}[ \\-]\\d{4}[ \\-]\\d{4}[ \\-]\\d{1,4}|\\d{4}[ \\-]\\d{6}[ \\-]\\d{5})\\b",
+      "description": "payment card number, confirmed by Luhn checksum and an issuer prefix. The earlier pattern allowed a separator between every digit, so on real logs it spanned whitespace-separated fields and matched 'date time pid' as one 14-digit card. Separators are now only accepted in the groupings issuers actually use (4-4-4-N and Amex 4-6-5)."
     },
     {
       "name": "jp_mynumber",

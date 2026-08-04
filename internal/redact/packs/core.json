@@ -1,6 +1,6 @@
 {
   "name": "core",
-  "description": "Infrastructure topology, identifiers and timestamps. These are the high-cardinality values that dominate AIOps token cost; masking them is as much a compression win as a privacy one.",
+  "description": "Infrastructure topology, identifiers and timestamps. This pack is a privacy control, not a compression one — measured against the public LogHub corpora it changes prompt size by between -10% and +8%, because replacing a distinct value with a distinct <V*> placeholder costs about what the value did. Its value to compression is indirect but decisive: normalising these values is what lets the Drain stage recognise a thousand log lines as one template, and Drain is where essentially all the token reduction comes from.",
   "rules": [
     {
       "name": "email",

@@ -1,0 +1,122 @@
+name: Release
+
+# Fires on a version tag. The tag is the trigger rather than a manual dispatch so
+# that what ships is always exactly what is in the repository at that tag —
+# there is no path by which a released image contains code nobody tagged.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write   # create the GitHub release
+  packages: write   # push to ghcr.io
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE: ${{ github.repository }}
+
+jobs:
+  # The tag must not be able to ship something main would reject. This repeats
+  # the guarantee suite rather than trusting that CI ran on the same commit.
+  verify:
+    name: verify guarantees
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+      - run: go test -race -count=1 ./...
+      - name: Scan for known vulnerabilities
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+  image:
+    name: publish image
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # tree-sitter needs cgo, so arm64 cannot be cross-compiled from an amd64
+      # host without a cross toolchain. Emulating the build is slower but keeps
+      # the Dockerfile single-path and identical to what a developer runs.
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+          labels: |
+            org.opencontainers.image.title=PhiGate
+            org.opencontainers.image.description=SLM gateway for enterprise token optimisation and local data security
+            org.opencontainers.image.licenses=Apache-2.0
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: true
+          sbom: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Verify the published image actually runs
+        run: |
+          IMG="${{ env.REGISTRY }}/${{ env.IMAGE }}:${GITHUB_REF_NAME#v}"
+          docker run --rm "$IMG" -rules | head -5
+          # Startup must fail closed without credentials. If this ever exits 0,
+          # the release ships a gateway that will run as an open relay.
+          if docker run --rm "$IMG" 2>/dev/null; then
+            echo "::error::image started without PHIGATE_API_KEYS; refusing to release"
+            exit 1
+          fi
+
+  release:
+    name: create release
+    needs: image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          # Prefer the hand-written CHANGELOG section for this version. Falling
+          # back to generated notes only when there is no entry means a release
+          # never silently ships an unreviewed changelog.
+          awk -v v="${VERSION#v}" '
+            $0 ~ "^## \\[" v "\\]" {f=1; next}
+            f && /^## \[/ {exit}
+            f {print}
+          ' CHANGELOG.md > /tmp/notes.md
+
+          if [ ! -s /tmp/notes.md ]; then
+            echo "::warning::no CHANGELOG entry for ${VERSION}; using generated notes"
+            gh release create "$VERSION" --title "PhiGate $VERSION" --generate-notes
+            exit 0
+          fi
+
+          sed "s|ghcr.io/phigate/phigate:latest|${REGISTRY}/${IMAGE}:${VERSION#v}|" \
+            .github/release-footer.md >> /tmp/notes.md
+          gh release create "$VERSION" --title "PhiGate $VERSION" --notes-file /tmp/notes.md

@@ -154,3 +154,50 @@ func TestMyNumberIsClassifiedAsPII(t *testing.T) {
 }
 
 func nil2(Finding) string { return "<V>" }
+
+// TestCreditCardDoesNotFireOnLogIdentifiers is a regression test drawn from
+// real data: benchmarking against the public LogHub corpora showed the rule
+// firing 674 times across 16,000 lines of system logs, entirely on Hadoop block
+// ids and process ids that happen to satisfy Luhn.
+//
+// It matters beyond noise. A card is PII, PII is confidential, and confidential
+// payloads are confined to the local model — so each false positive silently
+// stopped an ordinary infrastructure log from reaching the cloud backend.
+func TestCreditCardDoesNotFireOnLogIdentifiers(t *testing.T) {
+	eng := MustEngine(Options{})
+	fired := func(s string) bool {
+		for _, f := range eng.Detect(s) {
+			if f.Rule == "credit_card" {
+				return true
+			}
+		}
+		return false
+	}
+
+	// Verbatim from LogHub HDFS/BGL samples; all pass Luhn.
+	for _, s := range []string{
+		"blk_6952295868487656571",
+		"blk_-4980916519894289629",
+		"081109 204453 34 INFO dfs.DataNode: receiving block",
+		"081109 205409 28 INFO dfs.FSNamesystem: BLOCK* ask",
+	} {
+		if fired(s) {
+			t.Errorf("FALSE POSITIVE: credit_card fired on log data %q; this would "+
+				"misclassify the payload as PII and confine it to the local model", s)
+		}
+	}
+
+	// Real card formats must still be caught, including JCB — the dominant
+	// domestic brand in Japan.
+	for _, s := range []string{
+		"card 4111111111111111",
+		"card 4111-1111-1111-1111",
+		"card 5500 0000 0000 0004",
+		"amex 3782 822463 10005",
+		"jcb 3530111333300000",
+	} {
+		if !fired(s) {
+			t.Errorf("MISSED: credit_card did not fire on %q", s)
+		}
+	}
+}

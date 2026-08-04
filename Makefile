@@ -11,7 +11,7 @@ EVALBIN := bin/phigate-eval
 PKG     := ./...
 IMAGE   := phigate:dev
 
-.PHONY: all build run test test-race guarantees fmt vet tidy lint vulncheck docker rules clean help
+.PHONY: all build run test test-race guarantees fmt vet tidy lint vulncheck docker corpus bench sweep rules clean help
 
 all: build
 
@@ -42,6 +42,20 @@ guarantees:
 	go test -count=1 ./internal/sandbox/ -run 'TestGuardBlocks|TestGuardBypasses|TestGuardDoesNotBlockProse'
 	@echo "== cache does not leak across sessions =="
 	go test -count=1 ./internal/gateway/ -run 'TestTemplateCache|TestPolicyForbids|TestDebugEndpoint|TestAuthentication'
+
+## corpus: fetch the public LogHub benchmark corpora into eval/corpus
+corpus:
+	@bash scripts/fetch-benchmark-corpus.sh eval/corpus
+
+## bench: measure token reduction per pipeline stage on the fetched corpus
+bench: build
+	@test -d eval/corpus || $(MAKE) corpus
+	@./$(EVALBIN) bench -dir eval/corpus
+
+## sweep: report what would be detected in the fetched corpus, by class and rule
+sweep: build
+	@test -d eval/corpus || $(MAKE) corpus
+	@./$(EVALBIN) leak -dir eval/corpus
 
 ## rules: print every redaction rule and its classification
 rules: build

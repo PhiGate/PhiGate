@@ -9,3 +9,8 @@
 # repository, and both are referenced by nothing the build needs.
 /Prompt.md
 /.claude/
+
+# Benchmark corpora are fetched, not vendored: they are third-party data, and
+# committing them would both bloat the repo and invite the suspicion that the
+# numbers were measured on a corpus we curated.
+/eval/corpus/
