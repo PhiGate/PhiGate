@@ -83,7 +83,7 @@ jobs:
       # failed to type-check the code — a CI failure caused by the calendar
       # rather than by the commit. An explicit version makes lint results a
       # function of the repository, not of the day the job ran.
-      - uses: golangci/golangci-lint-action@v8
+      - uses: golangci/golangci-lint-action@v9
         with:
           version: v2.12.2
 
