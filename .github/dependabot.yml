@@ -1,0 +1,55 @@
+# Dependabot configuration.
+#
+# PhiGate's supply chain is deliberately tiny — one third-party dependency family
+# (tree-sitter) plus the standard library — because a security gateway should be
+# auditable end to end. That makes keeping it current cheap, and it makes any
+# unexpected new dependency in a Dependabot PR worth a second look.
+#
+# The Go toolchain itself is the dependency that has actually bitten this project:
+# a stdlib two minor versions behind carried 25 vulnerabilities reachable through
+# PhiGate's own TLS listener. Dependabot does not bump the toolchain, so the
+# `docker` ecosystem entry below (which watches golang:1.26-bookworm) and the
+# govulncheck CI job are what cover that gap.
+
+version: 2
+
+updates:
+  # Go module dependencies.
+  - package-ecosystem: gomod
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels: [dependencies, go]
+    commit-message:
+      prefix: "deps"
+    groups:
+      # tree-sitter ships the grammar bindings as separate modules that move
+      # together; three separate PRs for one upgrade is noise.
+      tree-sitter:
+        patterns:
+          - "github.com/tree-sitter/*"
+
+  # The build image. This is how a stdlib security release reaches the shipped
+  # binary, since the released artifact is the container.
+  - package-ecosystem: docker
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    labels: [dependencies, docker, security]
+    commit-message:
+      prefix: "build"
+
+  # Workflow actions. Pinned action versions go stale silently, and a stale
+  # action is how the lint job ended up running a version that predated the
+  # project's own Go toolchain.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    labels: [dependencies, ci]
+    commit-message:
+      prefix: "ci"
