@@ -61,10 +61,10 @@ scripts/fetch-benchmark-corpus.sh
 | Spark | 77,682 | 802 | 99.0% |
 | Zookeeper | 115,973 | 1,138 | 99.0% |
 | Linux | 88,563 | 950 | 98.9% |
-| BGL | 160,587 | 5,703 | 96.4% |
-| HDFS | 103,869 | 4,382 | 95.8% |
-| Thunderbird | 143,187 | 10,655 | 92.6% |
-| **All eight** | **849,747** | **24,503** | **97.1%** |
+| BGL | 160,587 | 3,749 | 97.7% |
+| HDFS | 103,869 | 4,015 | 96.1% |
+| Thunderbird | 143,187 | 10,573 | 92.6% |
+| **All eight** | **849,747** | **22,100** | **97.4%** |
 
 **Read these with their caveats.** These are 2,000-line samples of highly
 repetitive machine logs — Drain's best case, and the traffic PhiGate is built
@@ -73,7 +73,7 @@ figure measures compression only; requests the router keeps local, and template
 cache hits, avoid 100% of cloud prompt cost rather than 97%.
 
 **Where the saving actually comes from — and doesn't.** Masking contributes
-between **−10% and +8%** depending on dataset. It sometimes makes prompts
+between **−10.5% and +7.5%** depending on dataset. It sometimes makes prompts
 *larger*, because a distinct value replaced by a distinct `<V1234>` placeholder
 costs about what the value did. Essentially all reduction is Drain's. The masking
 stage is a privacy control whose contribution to cost is indirect: normalising

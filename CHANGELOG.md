@@ -12,6 +12,28 @@ read.
 
 ## [Unreleased]
 
+## [0.1.1] — 2026-08-04
+
+Repository tooling only. **The gateway binary and container image are byte-for-byte
+equivalent to 0.1.0** — no Go source, dependency, rule pack or Dockerfile changed.
+Released as a tag so the supply-chain configuration below is covered by the same
+signed release process as everything else.
+
+### Added
+
+- **Dependabot configuration** for Go modules, the `golang` build image, and
+  workflow actions. Watching the build image matters more than it looks: the
+  released artifact is the container, so a standard-library security release
+  reaches users through the base image rather than through `go.mod`. Dependabot
+  does not bump Go toolchains, so that entry plus the `govulncheck` CI job are
+  what cover the gap that produced the 25 stdlib advisories fixed in 0.1.0.
+- **Push-protection guidance** (`.github/SECRET_SCANNING.md`), linked from
+  GitHub's secret-scanning block message. It puts rotation before history
+  rewriting — removing a secret from git does not un-leak it — and documents the
+  fragment technique for test fixtures, which this repository needs more than
+  most: a corpus that proves credentials are detected is necessarily full of
+  things that look like credentials, and a scanner cannot tell the difference.
+
 ## [0.1.0] — 2026-08-04
 
 First public release. The three-stage pipeline (compression, routing, egress
@@ -123,5 +145,6 @@ anyone who clones the repository.
   no credential-shaped literal exists in the repository. `TestNoLiteralCredentialsInCorpus`
   enforces this for future contributors.
 
-[Unreleased]: https://github.com/phigate/phigate/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/phigate/phigate/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/phigate/phigate/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/phigate/phigate/releases/tag/v0.1.0
