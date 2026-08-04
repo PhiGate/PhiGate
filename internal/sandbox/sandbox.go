@@ -163,10 +163,9 @@ func (g *RuleGuard) Inspect(text string) Verdict {
 	for _, seg := range segs {
 		cmds := splitCommands(seg.Text)
 		for _, r := range g.rules {
+			// Info-severity matches are still recorded: they carry no action
+			// but are useful in the audit trail.
 			sev := g.severityOf(r)
-			if sev == SeverityInfo && r.Severity == SeverityInfo {
-				// Still record info findings; they are useful in audit.
-			}
 			if r.MatchSegment != nil && r.MatchSegment(seg) {
 				v.add(Finding{
 					Rule: r.Name, Severity: sev.String(), Match: trim(seg.Text),

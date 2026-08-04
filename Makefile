@@ -11,7 +11,7 @@ EVALBIN := bin/phigate-eval
 PKG     := ./...
 IMAGE   := phigate:dev
 
-.PHONY: all build run test test-race guarantees fmt vet tidy lint docker rules clean help
+.PHONY: all build run test test-race guarantees fmt vet tidy lint vulncheck docker rules clean help
 
 all: build
 
@@ -59,11 +59,19 @@ vet:
 tidy:
 	go mod tidy
 
-## lint: run golangci-lint if installed
+## lint: run golangci-lint if installed (config and timeout live in .golangci.yml)
 lint:
 	@command -v golangci-lint >/dev/null 2>&1 \
-	  && golangci-lint run --timeout=5m \
-	  || echo "golangci-lint not installed; skipping (see .github/workflows/ci.yml)"
+	  && golangci-lint run \
+	  || echo "golangci-lint v2 not installed; skipping. Install with:" \
+	     "go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2"
+
+## vulncheck: scan dependencies and the stdlib for known vulnerabilities
+vulncheck:
+	@command -v govulncheck >/dev/null 2>&1 \
+	  && govulncheck ./... \
+	  || echo "govulncheck not installed; skipping. Install with:" \
+	     "go install golang.org/x/vuln/cmd/govulncheck@latest"
 
 ## docker: build the distroless container image
 docker:

@@ -127,7 +127,7 @@ docker run -p 8080:8080 \
   ghcr.io/phigate/phigate:latest
 ```
 
-ソースからビルドする場合（Go 1.23+ と C コンパイラが必要。tree-sitter が cgo を
+ソースからビルドする場合（Go 1.26+ と C コンパイラが必要。tree-sitter が cgo を
 使うため）:
 
 ```bash

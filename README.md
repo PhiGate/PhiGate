@@ -129,7 +129,7 @@ docker run -p 8080:8080 \
   ghcr.io/phigate/phigate:latest
 ```
 
-Or from source (needs Go 1.23+ and a C compiler — tree-sitter uses cgo):
+Or from source (needs Go 1.26+ and a C compiler — tree-sitter uses cgo):
 
 ```bash
 make build && make run
@@ -280,7 +280,7 @@ for My Number without flooding the dictionary with false positives.
 
 ## Requirements
 
-- Go **1.23+** and a C compiler (`gcc`/`clang`) — tree-sitter needs
+- Go **1.26+** and a C compiler (`gcc`/`clang`) — tree-sitter needs
   `CGO_ENABLED=1`. The [Dockerfile](Dockerfile) removes this requirement entirely.
 - Optionally a local [Ollama](https://ollama.com) running `phi4-mini`, and/or a
   cloud API key. With neither, the gateway still boots, compresses and audits.

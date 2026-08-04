@@ -43,13 +43,6 @@ type Message struct {
 	Extra   map[string]json.RawMessage
 }
 
-// messageAlias avoids recursion in the custom marshaller.
-type messageAlias struct {
-	Role    string          `json:"role"`
-	Content json.RawMessage `json:"content"`
-	Name    string          `json:"name,omitempty"`
-}
-
 // UnmarshalJSON accepts both string content and the content-array form.
 func (m *Message) UnmarshalJSON(b []byte) error {
 	var raw map[string]json.RawMessage

@@ -162,7 +162,7 @@ func probeSelf(addrFlag string) error {
 	if err != nil {
 		return fmt.Errorf("health probe failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<10))
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("health probe returned %d", resp.StatusCode)

@@ -23,7 +23,7 @@ a test that would catch the regression:
 
 ```bash
 git clone https://github.com/phigate/phigate && cd phigate
-make build     # needs Go 1.23+ and a C compiler (tree-sitter uses cgo)
+make build     # needs Go 1.26+ and a C compiler (tree-sitter uses cgo)
 make test
 ```
 

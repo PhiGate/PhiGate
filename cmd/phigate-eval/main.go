@@ -385,7 +385,7 @@ func ask(ctx context.Context, baseURL, key, model, prompt string) (string, http.
 	if err != nil {
 		return "", nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return "", nil, fmt.Errorf("status %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))

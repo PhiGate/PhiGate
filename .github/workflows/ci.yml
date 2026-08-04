@@ -25,7 +25,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.23"
+          go-version: "1.26"
           cache: true
 
       - name: Verify formatting
@@ -52,7 +52,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.23"
+          go-version: "1.26"
           cache: true
 
       # These are the product's claims. They get their own job so a failure is
@@ -76,12 +76,16 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.23"
+          go-version: "1.26"
           cache: true
-      - uses: golangci/golangci-lint-action@v6
+      # Pinned deliberately. `version: latest` on action@v6 resolved to the
+      # golangci-lint v1 line, which predates this module's Go toolchain and
+      # failed to type-check the code — a CI failure caused by the calendar
+      # rather than by the commit. An explicit version makes lint results a
+      # function of the repository, not of the day the job ran.
+      - uses: golangci/golangci-lint-action@v8
         with:
-          version: latest
-          args: --timeout=5m
+          version: v2.12.2
 
   govulncheck:
     name: govulncheck
@@ -90,9 +94,14 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.23"
+          go-version: "1.26"
           cache: true
-      - name: Scan dependencies for known vulnerabilities
+      # PhiGate terminates TLS on its listener and initiates TLS to upstream
+      # providers, so standard-library TLS/HTTP/x509 advisories apply directly
+      # to it. This job is the reason go.mod sets a Go floor rather than a
+      # minimum language version: an older toolchain builds a binary with a
+      # known-vulnerable stdlib, and that binary is what ships in the image.
+      - name: Scan dependencies and stdlib for known vulnerabilities
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@latest
           govulncheck ./...

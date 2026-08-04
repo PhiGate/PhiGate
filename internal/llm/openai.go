@@ -107,7 +107,7 @@ func (c *OpenAIClient) doChat(ctx context.Context, req *types.ChatCompletionRequ
 	if err != nil {
 		return nil, fmt.Errorf("%s backend request failed: %w", c.cfg.Name, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 	if err != nil {
@@ -166,7 +166,7 @@ func (c *OpenAIClient) doStream(ctx context.Context, req *types.ChatCompletionRe
 	if err != nil {
 		return fmt.Errorf("%s backend stream failed: %w", c.cfg.Name, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
@@ -224,7 +224,7 @@ func (c *OpenAIClient) Probe(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("%s backend unreachable: %w", c.cfg.Name, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode >= 500 {
 		return &StatusError{Backend: c.cfg.Name, Status: resp.StatusCode}

@@ -1,13 +1,13 @@
 # PhiGate container image.
 #
 # tree-sitter requires cgo, which is the single biggest adoption barrier the
-# project has: "you need Go 1.23 and a working C toolchain" stops evaluation
+# project has: "you need Go 1.26 and a working C toolchain" stops evaluation
 # before it starts in most enterprise environments. This image removes that
 # barrier — the result is a static binary on a distroless base with no shell,
 # no package manager, and nothing else to audit.
 
 # ---------- build ----------
-FROM golang:1.23-bookworm AS build
+FROM golang:1.26-bookworm AS build
 
 WORKDIR /src
 
