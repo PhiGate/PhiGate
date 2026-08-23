@@ -77,6 +77,35 @@ type Event struct {
 	Error  string
 }
 
+// Sink is the seam audit destinations plug into.
+//
+// The community edition writes JSON lines to a file or stderr. An ISMS or APPI
+// audit generally asks for more than that — append-only storage with a
+// retention proof, or delivery into the customer's SIEM — and those substitute
+// here without the request path changing.
+type Sink interface {
+	// Log writes one event. Implementations must not block the request path;
+	// an audit destination that stalls must drop or buffer, never wait.
+	Log(e Event)
+	// Enabled reports whether events are being written, which /readyz and the
+	// dashboard surface so a deployment cannot quietly lose its audit trail.
+	Enabled() bool
+}
+
+// Compile-time proof that the file logger satisfies the seam.
+var _ Sink = (*Logger)(nil)
+
+// Nop is a Sink that discards events. It is the gateway's default, so a
+// Gateway constructed without an audit destination reports honestly that
+// auditing is off rather than panicking on the first request.
+type Nop struct{}
+
+// Log discards the event.
+func (Nop) Log(Event) {}
+
+// Enabled reports false: nothing is being written.
+func (Nop) Enabled() bool { return false }
+
 // Logger writes audit events.
 type Logger struct {
 	log     *slog.Logger

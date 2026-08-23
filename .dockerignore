@@ -12,3 +12,9 @@ THREAT-MODEL.md
 Prompt.md
 prepare_test.md
 deploy
+
+# The Enterprise Edition is a separate module under a separate licence, and the
+# published image is the Community Edition. Excluding it keeps BSL-licensed
+# source out of every layer of an Apache-2.0 artifact, and keeps the build
+# context honest about what is being built.
+ee

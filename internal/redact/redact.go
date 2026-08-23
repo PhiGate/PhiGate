@@ -170,6 +170,25 @@ type Finding struct {
 // Sensitivity reports the rank of the finding's category.
 func (f Finding) Sensitivity() Sensitivity { return f.Category.Sensitivity() }
 
+// Detector is the seam detection backends plug into.
+//
+// The community edition detects with the regex rule packs in packs/. A detector
+// backed by a name dictionary or a small language model substitutes here
+// without the compression pipeline changing — which is what raises precision on
+// Japanese names and addresses, where a regex can only buy recall by
+// over-masking ordinary text.
+type Detector interface {
+	// Redact replaces every finding in text using replace, returning the
+	// rewritten text and what was found.
+	Redact(text string, replace func(Finding) string) (string, []Finding)
+	// Rules reports the active rule set, so an operator or an auditor can
+	// confirm what is enforced without reading the deployment's environment.
+	Rules() []Rule
+}
+
+// Compile-time proof that the regex engine satisfies the seam.
+var _ Detector = (*Engine)(nil)
+
 // Engine detects sensitive spans using a compiled set of rules plus an optional
 // entropy detector for credentials no pattern anticipated.
 type Engine struct {

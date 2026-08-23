@@ -383,8 +383,39 @@ internal/
   config/             env configuration, fails loudly on bad values
 deploy/helm/phigate/  production Helm chart
 eval/cases.json       golden quality cases
+ee/                   Enterprise Edition — separate Go module, separate licence
 ```
+
+## Editions
+
+PhiGate is open-core. **Everything described in this README is the Community
+Edition, and it is free to run in production, forever, under Apache-2.0.** That
+includes every privacy control: the redaction packs, the Japanese PII rules, the
+egress policy, the sandbox, the audit log.
+
+The `ee/` directory is the Enterprise Edition, under a source-available licence.
+It is a **separate Go module**, which is what keeps the Community Edition's
+dependency list at one third-party module — the property a security review
+checks. Nothing in `ee/` can affect a CE build; `make ce-purity` fails if that
+ever changes.
+
+|  | Community Edition | Enterprise Edition |
+|---|---|---|
+| Licence | Apache-2.0 | [BSL 1.1](ee/LICENSE) → Apache-2.0 after 4 years |
+| Production use | free | commercial licence required |
+| Non-production use | free | free |
+| Dependencies | tree-sitter only | its own, isolated in `ee/go.mod` |
+
+EE is scale and operations — durable quotas, clustering, distributed caching,
+immutable audit storage, the control plane. It is not where the privacy
+guarantees live. See [ee/README.md](ee/README.md), and
+[ee/LICENSING-FAQ.md](ee/LICENSING-FAQ.md) for what "production" means, with
+worked examples. Evaluating EE against real production data is free on request.
 
 ## License
 
-[Apache License 2.0](LICENSE).
+Copyright 2026 Tenkan Inc. (天干株式会社). See [NOTICE](NOTICE).
+
+- Community Edition — everything outside `ee/`: [Apache License 2.0](LICENSE).
+- Enterprise Edition — `ee/`: [Business Source License 1.1](ee/LICENSE),
+  converting to Apache-2.0 four years after each version's release.

@@ -1,0 +1,40 @@
+PhiGate
+Copyright 2026 Tenkan Inc. (天干株式会社)
+
+This product includes software developed by Tenkan Inc. (天干株式会社).
+
+------------------------------------------------------------------------------
+Licensing
+------------------------------------------------------------------------------
+
+PhiGate is distributed under two licences, determined solely by where a file
+lives in this repository:
+
+  * Everything outside the ee/ directory is the PhiGate Community Edition and
+    is licensed under the Apache License, Version 2.0. See LICENSE.
+
+  * The ee/ directory is the PhiGate Enterprise Edition and is licensed under
+    the Business Source License 1.1. It is source-available, not open source.
+    See ee/LICENSE, and ee/LICENSING-FAQ.md for what "production" means.
+
+The published container image and the binaries built by `make build` contain
+the Community Edition only. The ee/ directory is excluded from the Docker build
+context, and `make ce-purity` fails the build if any Community Edition package
+imports from it.
+
+------------------------------------------------------------------------------
+Third-party components
+------------------------------------------------------------------------------
+
+The Community Edition binaries link the following third-party modules:
+
+  github.com/tree-sitter/go-tree-sitter          MIT
+  github.com/tree-sitter/tree-sitter-go          MIT
+  github.com/tree-sitter/tree-sitter-python      MIT
+  github.com/mattn/go-pointer                    MIT
+
+Verify this list against the shipped binaries with `make ce-purity`.
+
+The benchmark corpora under eval/corpus/ are not distributed with this
+repository. They are fetched on demand from the public LogHub dataset by
+scripts/fetch-benchmark-corpus.sh and remain under their own licences.

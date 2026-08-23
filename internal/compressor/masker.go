@@ -12,7 +12,7 @@ import "github.com/phigate/phigate/internal/redact"
 // Session dictionary, identical values always collapse to the same token and
 // remain hydratable.
 type Masker struct {
-	engine *redact.Engine
+	engine redact.Detector
 }
 
 // NewMasker returns a Masker using the default redaction engine (all built-in
@@ -21,9 +21,10 @@ func NewMasker() *Masker {
 	return &Masker{engine: redact.MustEngine(redact.Options{})}
 }
 
-// NewMaskerWith returns a Masker backed by a caller-supplied engine, which is
-// how the gateway applies an enterprise's own rule packs and internal domains.
-func NewMaskerWith(e *redact.Engine) *Masker { return &Masker{engine: e} }
+// NewMaskerWith returns a Masker backed by a caller-supplied detector, which is
+// how the gateway applies an enterprise's own rule packs and internal domains,
+// and how an alternative detection backend is substituted.
+func NewMaskerWith(e redact.Detector) *Masker { return &Masker{engine: e} }
 
 // Name implements Stage.
 func (m *Masker) Name() string { return "masker" }

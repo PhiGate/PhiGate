@@ -193,6 +193,42 @@ client = OpenAI(base_url="http://localhost:8080/v1", api_key="my-client-key")
 
 ---
 
+## エディション
+
+PhiGate はオープンコア構成です。**この README が説明する機能はすべて
+Community Edition であり、Apache-2.0 のもとで本番環境でも無償・無期限に
+利用できます。** マスキングルール、My Number をはじめとする日本向け PII
+検出、エグレスポリシー、サンドボックス、監査ログ — プライバシー保護に
+関わる機能はすべて CE に含まれます。
+
+`ee/` ディレクトリが Enterprise Edition で、ソース公開型のライセンスを
+採用しています。EE は**独立した Go モジュール**です。これにより CE の
+サードパーティ依存は tree-sitter 1 件のみという状態が構造的に保たれます
+— セキュリティ審査で実際に確認されるのはこの点です。`ee/` の内容が CE の
+ビルドに影響することはなく、万一そうなれば `make ce-purity` がビルドを
+失敗させます。
+
+|  | Community Edition | Enterprise Edition |
+|---|---|---|
+| ライセンス | Apache-2.0 | [BSL 1.1](ee/LICENSE)（4 年後に Apache-2.0 へ移行） |
+| 本番利用 | 無償 | 商用ライセンスが必要 |
+| 非本番利用（評価・開発・検証） | 無償 | 無償 |
+| 依存関係 | tree-sitter のみ | `ee/go.mod` に隔離 |
+
+EE が担うのは規模と運用です — 再起動後も維持されるクォータ、クラスタ構成、
+分散キャッシュ、改ざん不可能な監査ログ保管、コントロールプレーン。
+プライバシー保証そのものは EE ではなく CE にあります。
+
+「本番利用（production）」の定義と具体例は
+[ee/LICENSING-FAQ.md](ee/LICENSING-FAQ.md) に記載しています。実データを用いた
+EE の評価については、期間を区切った評価用ライセンスを無償で発行します
+（info@tenkan.co.jp）。日本企業のセキュリティ審査が 60 日を超えることは
+珍しくないため、その場合は期間を延長します。
+
 ## ライセンス
 
-[Apache License 2.0](LICENSE)
+Copyright 2026 Tenkan Inc. (天干株式会社) — [NOTICE](NOTICE) を参照。
+
+- Community Edition（`ee/` 以外のすべて）: [Apache License 2.0](LICENSE)
+- Enterprise Edition（`ee/`）: [Business Source License 1.1](ee/LICENSE)
+  — 各バージョンの公開から 4 年後に Apache-2.0 へ移行します。

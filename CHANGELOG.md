@@ -12,14 +12,90 @@ read.
 
 ## [Unreleased]
 
-## [0.1.1] — 2026-08-04
+## [0.2.0] — 2026-08-23
 
-Repository tooling only. **The gateway binary and container image are byte-for-byte
-equivalent to 0.1.0** — no Go source, dependency, rule pack or Dockerfile changed.
-Released as a tag so the supply-chain configuration below is covered by the same
-signed release process as everything else.
+Structural only. **No change to what the gateway detects, blocks, or lets leave
+the network.** The request path, the rule packs, the egress policy and the
+sandbox are untouched; the full guarantee suite passes with the `ee/` directory
+physically removed from the tree.
 
 ### Added
+
+- **Open-core structure.** PhiGate is now split into a Community Edition
+  (everything outside `ee/`, Apache-2.0, free in production forever — including
+  every privacy control) and an Enterprise Edition (`ee/`, BSL 1.1, free for
+  non-production use, commercial licence for production).
+
+  EE is a **separate Go module**, not a build tag. One module would mean one
+  `go.mod`, and enterprise dependencies — an OpenTelemetry SDK, an embedded
+  key/value store, a Redis client — would appear in the file a customer's
+  security review reads. A nested module means `go install
+  github.com/phigate/phigate/cmd/phigate` never resolves `ee/go.mod` at all.
+
+  Nothing is implemented in EE yet. `phigate-ee` builds, resolves the seams and
+  then refuses to serve, because shipping CE under an EE name would misrepresent
+  what is running.
+
+- **Four substitution seams**, each with a compile-time assertion that the
+  community implementation satisfies it: `cache.Store`, `tokens.LedgerStore`,
+  `redact.Detector`, and `audit.Sink`. EE substitutes implementations through
+  `Gateway.SetCache`, `SetLedger` and `SetAudit` rather than forking the request
+  path, so a bug fixed in CE is fixed in EE and CE's leak corpus still means
+  something for both.
+
+  Any `cache.Store` implementation inherits the obligation documented on the
+  interface: it holds **pre-hydration** text only. A tier that stores hydrated
+  answers would serve one session's real values to another.
+
+- **`make ce-purity`**, run in CI and as a release gate. It asserts that no
+  community package imports `ee/`, and that the shipped binaries link
+  tree-sitter, its grammars and `go-pointer` and nothing else. The check reads
+  `go list -deps` over `./cmd/...` rather than `go list -m all`: the module
+  graph includes the test-only dependencies *of* dependencies — tree-sitter
+  pulls testify — which are never compiled in, so the graph overstates what
+  ships.
+
+- **`make ee`**, building the enterprise module. It also settles the assumption
+  the layout rests on, that a nested module may import the parent module's
+  `internal/` packages.
+
+- **DCO sign-off** required on contributions (`git commit -s`). A CLA would only
+  be necessary to relicense the Community Edition away from Apache-2.0, which is
+  not intended; Apache-2.0 already permits CE contributions to be used in EE
+  with attribution preserved.
+
+- **Copyright declared.** `NOTICE` names Tenkan Inc. (天干株式会社) as copyright
+  holder, states which licence governs which directory, and lists the four
+  third-party modules actually linked into the shipped binaries. The repository
+  previously declared no owner at all — the Apache appendix was an unfilled
+  template and there was no `NOTICE`.
+
+- **`ee/LICENSING-FAQ.md`** defines "production", the word on which the entire
+  free/paid boundary turns and which BSL itself leaves undefined. It covers the
+  two cases that mislead people — internal-only use is still production, and
+  "staging" is decided by data and dependency rather than by the environment's
+  name — and commits to issuing free time-boxed evaluation licences for
+  real-data trials, extended when a security review runs long.
+
+### Fixed
+
+- **The audit sink no longer relies on nil-receiver methods.** `Gateway.audit`
+  was left nil until `SetAudit` ran and worked only because `*audit.Logger`'s
+  methods guard against a nil receiver — a path every test exercised, since no
+  test calls `SetAudit`. It now defaults to `audit.Nop{}`. Same observable
+  behaviour, no longer resting on the guard.
+
+### Supply-chain tooling, previously drafted as 0.1.1
+
+An earlier draft of this file documented the two entries below as `[0.1.1] —
+2026-08-04` and stated they had been "released as a tag". **That tag was never
+created.** No `v0.1.1` tag, GitHub release, or container image exists, and
+nothing was shipped between 0.1.0 and this release.
+
+They are folded in here rather than tagged retroactively. The 0.1.1 entry itself
+recorded that the binary and image were byte-for-byte equivalent to 0.1.0, so a
+retroactive release would have added a version to every user's upgrade decision
+without changing anything they run.
 
 - **Dependabot configuration** for Go modules, the `golang` build image, and
   workflow actions. Watching the build image matters more than it looks: the
@@ -145,6 +221,6 @@ anyone who clones the repository.
   no credential-shaped literal exists in the repository. `TestNoLiteralCredentialsInCorpus`
   enforces this for future contributors.
 
-[Unreleased]: https://github.com/phigate/phigate/compare/v0.1.1...HEAD
-[0.1.1]: https://github.com/phigate/phigate/compare/v0.1.0...v0.1.1
+[Unreleased]: https://github.com/phigate/phigate/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/phigate/phigate/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/phigate/phigate/releases/tag/v0.1.0

@@ -94,6 +94,58 @@ decision looks odd — several choices here (storing pre-hydration text in the
 cache, failing rather than falling back, scoping the guard to code) look like
 extra work until you know what goes wrong without them.
 
+## Licensing and sign-off
+
+PhiGate is open-core. Which licence applies depends only on where the file
+lives:
+
+- **Everything outside `ee/`** — Community Edition, [Apache-2.0](LICENSE).
+- **`ee/`** — Enterprise Edition, [BSL 1.1](ee/LICENSE). Source-available, not
+  open source; free for non-production use, commercial licence for production.
+
+Contributions to CE are accepted under Apache-2.0. Because Apache-2.0 is
+permissive, CE contributions may also be used in the Enterprise Edition with
+attribution preserved — you keep your copyright, and no rights are assigned.
+
+Every commit must carry a **`Signed-off-by` line**, certifying the
+[Developer Certificate of Origin](https://developercertificate.org/). Git adds
+it for you:
+
+```sh
+git commit -s -m "your message"
+```
+
+The DCO check runs on every pull request and must pass before merge. If you
+forgot the flag, you do not need to redo your work — rewrite the sign-off onto
+the commits you already have:
+
+```sh
+# the most recent commit
+git commit --amend -s --no-edit && git push --force-with-lease
+
+# every commit on your branch
+git rebase --signoff main && git push --force-with-lease
+```
+
+The name and email in the sign-off must match your commit author identity.
+Set them once, and save yourself the round trip:
+
+```sh
+git config user.name  "Your Name"
+git config user.email "you@example.com"
+```
+
+If you would rather not remember the flag, this repository ships a hook that
+adds the trailer for you. Enable it once per clone:
+
+```sh
+git config core.hooksPath .githooks
+```
+
+We use the DCO rather than a CLA deliberately. A CLA would require assigning
+rights and measurably reduces contribution; it would only be necessary if we
+intended to relicense the Community Edition away from Apache-2.0, and we do not.
+
 ## Reporting security issues
 
 Do not open a public issue. See [SECURITY.md](SECURITY.md).

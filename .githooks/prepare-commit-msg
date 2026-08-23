@@ -1,0 +1,33 @@
+#!/bin/sh
+# Append a DCO Signed-off-by line unless one is already present.
+#
+# Contributions to PhiGate are certified under the Developer Certificate of
+# Origin (https://developercertificate.org/), and the DCO check blocks a pull
+# request whose commits lack the trailer. Forgetting `git commit -s` costs a
+# rebase and a force-push, so this hook removes the chance to forget.
+#
+# Enable it once, per clone:
+#
+#     git config core.hooksPath .githooks
+#
+# It is deliberately not enabled automatically: git does not run hooks from a
+# fresh clone, and a repository that silently executes scripts on commit is not
+# something this project should teach people to accept.
+
+msg_file=$1
+
+name=$(git config user.name)
+email=$(git config user.email)
+
+if [ -z "$name" ] || [ -z "$email" ]; then
+	echo "prepare-commit-msg: git user.name and user.email must be set for DCO sign-off" >&2
+	exit 1
+fi
+
+sob="Signed-off-by: $name <$email>"
+
+# Only append when this exact trailer is absent: amending or rebasing a commit
+# that already carries it must not accumulate duplicates.
+if ! grep -qsF "$sob" "$msg_file"; then
+	printf '\n%s\n' "$sob" >>"$msg_file"
+fi

@@ -37,6 +37,28 @@ import (
 	"time"
 )
 
+// Store is the seam PhiGate's cache tiers plug into.
+//
+// The gateway depends on this interface rather than on the in-memory
+// implementation below, so an alternative tier — a semantic index, or a shared
+// store spanning several gateway nodes — can be substituted without the request
+// path knowing which one it is talking to.
+//
+// Every implementation inherits one non-negotiable obligation from the package
+// doc above: it stores answers *before* hydration. A tier that persists or
+// shares hydrated text serves one session's real values to another.
+type Store interface {
+	// Get returns a cached entry if one is present and unexpired.
+	Get(key string) (Entry, bool)
+	// Put stores a pre-hydration answer.
+	Put(key string, e Entry)
+	// Purge empties the store. Callers use it when a rule change alters what
+	// "compressed" means, which invalidates every key.
+	Purge()
+	// Stats returns a snapshot of effectiveness.
+	Stats() Stats
+}
+
 // Entry is a cached, still-masked answer.
 type Entry struct {
 	// Content is the answer as the model produced it, with placeholders intact.
@@ -68,7 +90,8 @@ type Stats struct {
 	SharedTenantOK bool    `json:"shared_across_tenants"`
 }
 
-// Cache is a bounded, TTL'd, LRU store of masked answers.
+// Cache is a bounded, TTL'd, LRU store of masked answers, and the Store
+// implementation the community edition ships with.
 type Cache struct {
 	mu    sync.Mutex
 	ttl   time.Duration
@@ -84,6 +107,9 @@ type node struct {
 	key string
 	e   Entry
 }
+
+// Compile-time proof that the in-memory cache satisfies the seam.
+var _ Store = (*Cache)(nil)
 
 // New returns a Cache holding at most max entries for at most ttl each.
 // A non-positive max disables the cache.

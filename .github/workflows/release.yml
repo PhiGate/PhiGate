@@ -33,6 +33,19 @@ jobs:
           go install golang.org/x/vuln/cmd/govulncheck@latest
           govulncheck ./...
 
+      # The community edition's dependency list is a published claim, so it is
+      # a release gate rather than a CI nicety: a tag must not be able to ship
+      # an image whose contents contradict what the README tells a security
+      # reviewer to expect.
+      - name: Community edition stayed clean
+        run: make ce-purity
+
+      # The enterprise module is not shipped in the image, but it must still
+      # build at the tag — a release where ee/ does not compile against the CE
+      # seams means the two editions have already drifted.
+      - name: Enterprise edition builds against the CE seams
+        run: make ee
+
   image:
     name: publish image
     needs: verify

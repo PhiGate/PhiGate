@@ -67,6 +67,24 @@ func (t Totals) SavingsPercent() float64 {
 	return pct
 }
 
+// LedgerStore is the seam accounting backends plug into.
+//
+// The community edition keeps totals in memory, which is honest for a PoC and
+// wrong for a production quota: a rolling update or a crash resets every
+// tenant's consumption to zero, so a monthly hard limit stops being a limit.
+// Durable and cross-node implementations substitute here without the request
+// path changing.
+type LedgerStore interface {
+	// Record accounts one request against baselineModel, the model whose price
+	// defines what the request would have cost without PhiGate.
+	Record(r Record, baselineModel string)
+	// Totals returns a process-wide snapshot.
+	Totals() Totals
+}
+
+// Compile-time proof that the in-memory ledger satisfies the seam.
+var _ LedgerStore = (*Ledger)(nil)
+
 // Ledger accumulates token and money accounting across the process lifetime.
 //
 // It answers the only FinOps question that matters: "how much did PhiGate save

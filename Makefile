@@ -11,7 +11,7 @@ EVALBIN := bin/phigate-eval
 PKG     := ./...
 IMAGE   := phigate:dev
 
-.PHONY: all build run test test-race guarantees fmt vet tidy lint vulncheck docker corpus bench sweep rules clean help
+.PHONY: all build run test test-race guarantees ee ce-purity fmt vet tidy lint vulncheck docker corpus bench sweep rules clean help
 
 all: build
 
@@ -42,6 +42,42 @@ guarantees:
 	go test -count=1 ./internal/sandbox/ -run 'TestGuardBlocks|TestGuardBypasses|TestGuardDoesNotBlockProse'
 	@echo "== cache does not leak across sessions =="
 	go test -count=1 ./internal/gateway/ -run 'TestTemplateCache|TestPolicyForbids|TestDebugEndpoint|TestAuthentication'
+
+## ee: build the enterprise edition module (separate go.mod, own dependencies)
+##
+## Output goes to the shared, gitignored bin/ rather than the default, which
+## drops the executable next to the source it was built from.
+ee:
+	cd ee && go build -o ../bin/ ./...
+
+## ce-purity: prove the community edition stayed dependency-light and unentangled
+##
+## Two invariants, both of which are load-bearing for the Open-Core split:
+##   1. CE's dependency list is tree-sitter and nothing else. This is the
+##      property a security review checks, and it is why EE is a nested module.
+##   2. No CE package imports EE. The dependency runs one way only; if it ever
+##      reverses, deleting /ee stops producing a working community edition.
+ce-purity:
+	@echo "== CE imports no EE package =="
+	@! grep -rn '"github.com/phigate/phigate/ee' --include='*.go' cmd internal \
+	  || { echo "FAIL: a community-edition package imports /ee"; exit 1; }
+	@echo "== CE binaries link no unexpected module =="
+	@# Deliberately `go list -deps` on the binaries, not `go list -m all`. The
+	@# module graph includes the test-only dependencies of dependencies
+	@# (tree-sitter pulls testify), which are never compiled in. What a security
+	@# review is entitled to ask about is what ends up in the shipped binary.
+	@extra=$$(go list -deps -f '{{with .Module}}{{.Path}}{{end}}' ./cmd/... \
+	  | sort -u | grep -v '^$$' \
+	  | grep -v '^github.com/phigate/phigate$$' \
+	  | grep -v '^github.com/tree-sitter/' \
+	  | grep -v '^github.com/mattn/go-pointer$$'); \
+	if [ -n "$$extra" ]; then \
+	  echo "FAIL: unexpected modules linked into the community edition:"; \
+	  echo "$$extra"; \
+	  echo "If this belongs to the enterprise edition, it goes in ee/go.mod."; \
+	  exit 1; \
+	fi
+	@echo "ok: community edition is clean"
 
 ## corpus: fetch the public LogHub benchmark corpora into eval/corpus
 corpus:

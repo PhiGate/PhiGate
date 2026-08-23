@@ -27,13 +27,13 @@ type Gateway struct {
 	ingress  *sandbox.IngressGuard
 	policy   policy.Policy
 	sessions *session.Store
-	cache    *cache.Cache
-	ledger   *tokens.Ledger
+	cache    cache.Store
+	ledger   tokens.LedgerStore
 	prices   *tokens.PriceBook
 	counter  tokens.Counter
-	audit    *audit.Logger
+	audit    audit.Sink
 	metrics  *gatewayMetrics
-	engine   *redact.Engine
+	engine   redact.Detector
 
 	local      llm.Client
 	cloud      llm.Client
@@ -81,11 +81,13 @@ func New(cfg config.Config) (*Gateway, error) {
 	return NewWith(cfg, engine, prices, local, cloud, router.NewHeuristicRouter())
 }
 
-// NewWith builds a Gateway with injected backends, engine and router. Tests use
-// it to drive the full request path without network access.
+// NewWith builds a Gateway with injected backends, detector and router. Tests
+// use it to drive the full request path without network access, and the
+// enterprise edition uses it to substitute its own implementations of the
+// package seams without forking the request path.
 func NewWith(
 	cfg config.Config,
-	engine *redact.Engine,
+	engine redact.Detector,
 	prices *tokens.PriceBook,
 	local, cloud llm.Client,
 	rtr router.Router,
@@ -112,6 +114,7 @@ func NewWith(
 		prices:     prices,
 		ledger:     tokens.NewLedger(prices),
 		counter:    tokens.NewHeuristic(),
+		audit:      audit.Nop{},
 		engine:     engine,
 		local:      local,
 		cloud:      cloud,
@@ -124,8 +127,44 @@ func NewWith(
 	return g, nil
 }
 
-// SetAudit attaches an audit logger.
-func (g *Gateway) SetAudit(a *audit.Logger) { g.audit = a }
+// SetAudit attaches an audit destination. Passing nil restores the no-op sink
+// rather than leaving a nil interface the request path would panic on.
+func (g *Gateway) SetAudit(a audit.Sink) {
+	if a == nil {
+		g.audit = audit.Nop{}
+		return
+	}
+	g.audit = a
+}
+
+// SetCache substitutes the answer cache — a semantic tier, or a store shared
+// across gateway nodes.
+//
+// Whatever is installed inherits the obligation documented on cache.Store: it
+// holds pre-hydration text only. A tier that stores hydrated answers serves one
+// session's real values to another, which is the failure the whole caching
+// design is arranged to prevent.
+func (g *Gateway) SetCache(c cache.Store) {
+	if c == nil {
+		return
+	}
+	g.cache = c
+}
+
+// SetLedger substitutes the accounting backend, typically to make quota
+// consumption survive a restart.
+func (g *Gateway) SetLedger(l tokens.LedgerStore) {
+	if l == nil {
+		return
+	}
+	g.ledger = l
+}
+
+// The setters above are wiring, not runtime configuration: call them during
+// startup, before the server begins accepting requests. The metric gauges read
+// these fields at scrape time rather than capturing them, so a substitution
+// made at startup is reflected correctly — but the fields are not guarded, and
+// swapping one while requests are in flight is a data race.
 
 // Close releases background resources.
 func (g *Gateway) Close() {

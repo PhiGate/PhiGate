@@ -69,6 +69,28 @@ jobs:
       - name: Cache does not leak across sessions
         run: go test -v -count=1 ./internal/gateway/ -run 'TestTemplateCache|TestPolicyForbids|TestDebugEndpoint|TestAuthentication'
 
+  open-core:
+    name: open-core split
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+
+      # The community edition's dependency list is a product claim, not a
+      # detail: it is what a customer's security review reads, and it is the
+      # reason the enterprise edition is a separate module rather than a build
+      # tag. This job fails the moment either half of that stops being true.
+      - name: Community edition stayed clean
+        run: make ce-purity
+
+      # Building EE also settles the question the layout rests on — whether a
+      # nested module may import the parent module's internal/ packages.
+      - name: Enterprise edition builds against the CE seams
+        run: make ee
+
   lint:
     name: golangci-lint
     runs-on: ubuntu-latest
