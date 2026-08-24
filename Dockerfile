@@ -7,7 +7,7 @@
 # no package manager, and nothing else to audit.
 
 # ---------- build ----------
-FROM golang:1.26-bookworm AS build
+FROM golang:1.27-bookworm AS build
 
 WORKDIR /src
 
