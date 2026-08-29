@@ -18,7 +18,7 @@ attached. The release job refuses to publish an image that starts without
 Nothing here has to be taken on trust:
 
 ```bash
-make guarantees                            # the four security guarantees, as named checks
+make guarantees                            # every security guarantee, as named checks
 scripts/fetch-benchmark-corpus.sh          # public third-party log corpora (LogHub)
 ./bin/phigate-eval bench -dir eval/corpus  # token reduction, reproducible
 ./bin/phigate-eval leak  -dir eval/corpus  # detection coverage on your own logs

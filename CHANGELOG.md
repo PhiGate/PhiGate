@@ -12,6 +12,13 @@ read.
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-08-30
+
+Two defects in the streaming egress path, and the evaluation on-ramp that was
+missing. **This release changes what the gateway blocks on streamed responses**
+— see the first entry below, which is the one to re-approve rather than merely
+read.
+
 ### Security
 
 - **A streamed answer is now guarded exactly as a non-streamed one.** This
@@ -85,6 +92,19 @@ read.
   credential because `/metrics` sits behind the same authentication as the rest
   of the API — per-rule block counts and token totals describe traffic through a
   data-protection boundary, and are not something to serve unauthenticated.
+
+### Fixed
+
+- **The Helm chart deployed the wrong version of PhiGate.** `Chart.yaml` was
+  still at `0.1.0` and `values.yaml` defaults `image.tag` to `.Chart.AppVersion`,
+  so `helm install` from the 0.2.0 tag installed the **0.1.0** image — without
+  the open-core split's fixes, and without anything in this release. The chart
+  version and `appVersion` now track the release, and both are part of the
+  release checklist rather than a step to remember.
+
+  Anyone running the chart from 0.1.0 or 0.2.0 should check what is actually
+  deployed: `kubectl get deploy -o jsonpath='{..image}'`. Pinning
+  `image.tag` explicitly in your values file also avoids this class of mistake.
 
 ## [0.2.0] — 2026-08-23
 
@@ -295,6 +315,7 @@ anyone who clones the repository.
   no credential-shaped literal exists in the repository. `TestNoLiteralCredentialsInCorpus`
   enforces this for future contributors.
 
-[Unreleased]: https://github.com/phigate/phigate/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/phigate/phigate/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/phigate/phigate/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/phigate/phigate/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/phigate/phigate/releases/tag/v0.1.0
