@@ -1,0 +1,23 @@
+# Prometheus configuration for the docker-compose evaluation stack.
+#
+# Used by docker-compose.yml at the repository root; not part of the Helm
+# chart, which expects an existing Prometheus and a ServiceMonitor.
+
+global:
+  scrape_interval: 10s
+  evaluation_interval: 10s
+
+scrape_configs:
+  - job_name: phigate
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["phigate:8080"]
+    # PhiGate's metrics endpoint sits behind the same authentication as the
+    # rest of the API. That is deliberate — request counts, token totals and
+    # per-rule block counts describe the traffic passing through a data
+    # protection boundary, and are not something to serve unauthenticated on a
+    # port anyone can reach. The credential below is the demo key from
+    # docker-compose.yml; change both together.
+    authorization:
+      type: Bearer
+      credentials: demo-key

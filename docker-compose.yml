@@ -1,0 +1,136 @@
+# PhiGate evaluation stack: gateway + local SLM + metrics, in one command.
+#
+#   docker compose up
+#
+# This exists because the honest first evaluation of PhiGate — run it on your
+# own logs, with no data leaving the machine — otherwise takes an afternoon of
+# assembly: install Go 1.26 and a C compiler for tree-sitter, install Ollama,
+# pull a model, wire Prometheus. None of that tells you anything about whether
+# the product works.
+#
+# Nothing here needs a cloud API key, and nothing here calls out to a cloud LLM.
+# See the PHIGATE_CLOUD_MAX_SENSITIVITY note on the phigate service for exactly
+# why that is true rather than merely intended.
+#
+# To evaluate against a cloud model as well, put a key in the environment and
+# raise the egress limit:
+#
+#   PHIGATE_CLOUD_API_KEY=sk-... PHIGATE_CLOUD_MAX_SENSITIVITY=internal \
+#     docker compose up
+
+services:
+  # The local SLM. PhiGate's whole premise is that most AIOps traffic never
+  # needs to leave the building, so the local backend is the default path here,
+  # not the fallback.
+  ollama:
+    image: ollama/ollama:latest
+    volumes:
+      - ollama-models:/root/.ollama
+    healthcheck:
+      # `ollama list` exercises the API through the CLI already in the image,
+      # which has no curl. A TCP check would report healthy while the model
+      # server is still starting.
+      test: ["CMD", "ollama", "list"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 10s
+
+  # Pulls the model once, then exits. Without this the evaluator's first
+  # request fails with a model-not-found from a service they did not know they
+  # had to prime, which reads as "the gateway is broken".
+  ollama-pull:
+    image: ollama/ollama:latest
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["ollama pull ${PHIGATE_LOCAL_MODEL:-phi4-mini}"]
+    restart: "no"
+
+  phigate:
+    image: ghcr.io/phigate/phigate:latest
+    # Deliberately the published image rather than `build: .`, so a first
+    # evaluation needs neither a Go toolchain nor a C compiler. To test your
+    # own working tree instead, run: docker compose up --build
+    # (uncomment the build stanza below).
+    # build: .
+    depends_on:
+      ollama-pull:
+        condition: service_completed_successfully
+    ports:
+      - "8080:8080"
+    environment:
+      PHIGATE_ADDR: ":8080"
+
+      # A demo credential, not a secret. The gateway refuses to start with no
+      # credentials at all rather than silently becoming an open proxy in front
+      # of someone's paid API key, so evaluation needs one to exist.
+      PHIGATE_API_KEYS: "demo-key:evaluator"
+
+      PHIGATE_LOCAL_PROVIDER: openai
+      PHIGATE_LOCAL_BASE_URL: http://ollama:11434/v1
+      PHIGATE_LOCAL_MODEL: ${PHIGATE_LOCAL_MODEL:-phi4-mini}
+
+      # Why this stack needs no cloud key.
+      #
+      # `low` confines anything classified above low sensitivity to the local
+      # model, and refuses to fall back to cloud on local failure. Real logs
+      # carry hostnames, IPs and paths, so they classify at internal or above
+      # and are structurally pinned to the local backend — not by convention,
+      # by internal/policy, which has tests for exactly this.
+      #
+      # The router may still send a *large payload with no sensitive findings
+      # at all* to the cloud backend, where an unset key produces an upstream
+      # error. That combination is rare in log traffic and loud when it
+      # happens, which is the right trade for an evaluation default: it can
+      # fail visibly, but it cannot leak.
+      PHIGATE_CLOUD_API_KEY: ${PHIGATE_CLOUD_API_KEY:-}
+      PHIGATE_CLOUD_MAX_SENSITIVITY: ${PHIGATE_CLOUD_MAX_SENSITIVITY:-low}
+      PHIGATE_ALLOW_CLOUD_FALLBACK: "false"
+
+      PHIGATE_INTERNAL_DOMAINS: "internal,corp,local,lan,intra"
+      PHIGATE_INGRESS_SCAN: "true"
+      PHIGATE_DASHBOARD: "true"
+      PHIGATE_METRICS_PATH: "/metrics"
+
+      # PHIGATE_AUDIT_LOG is deliberately unset: with no path the audit sink
+      # writes JSON to stderr, so `docker compose logs phigate` shows what the
+      # gateway decided about every request. The event type has no field able
+      # to hold a raw value, so that output is safe to read and safe to paste
+      # into a ticket.
+      PHIGATE_AUDIT_DISABLED: "false"
+
+  prometheus:
+    image: prom/prometheus:latest
+    depends_on:
+      - phigate
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=24h
+
+  # Reproduce the published benchmark on the public LogHub corpus, or measure
+  # your own logs. Opt-in, because it is a one-shot job rather than a service:
+  #
+  #   scripts/fetch-benchmark-corpus.sh          # once; eval/corpus is gitignored
+  #   docker compose run --rm bench              # published numbers
+  #   docker compose run --rm -v /var/log:/data:ro bench -dir /data
+  #
+  # The corpus is fetched rather than vendored on purpose: a vendor
+  # benchmarking its compressor on logs the vendor wrote proves nothing.
+  bench:
+    image: ghcr.io/phigate/phigate:latest
+    profiles: ["bench"]
+    entrypoint: ["/usr/local/bin/phigate-eval", "bench"]
+    command: ["-dir", "/corpus"]
+    volumes:
+      - ./eval/corpus:/corpus:ro
+
+volumes:
+  ollama-models:

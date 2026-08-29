@@ -190,6 +190,43 @@ a guardrail gets switched off — and a guardrail that is off protects nothing.
 
 ## Quick start
 
+**Evaluate the whole thing in one command — no cloud API key, nothing leaves the
+machine:**
+
+```bash
+docker compose up
+```
+
+That brings up PhiGate, a local Phi-4-mini on [Ollama](https://ollama.com) (pulled
+for you) and Prometheus. The egress limit is set to `low`, so anything carrying a
+hostname, an IP or a path is pinned to the local model by
+[`internal/policy`](internal/policy/) rather than by intention. Then:
+
+```bash
+curl localhost:8080/v1/chat/completions \
+  -H 'Authorization: Bearer demo-key' -H 'Content-Type: application/json' \
+  -d '{"model":"phi4-mini","messages":[
+        {"role":"user","content":"nginx upstream timeout to 10.24.8.19, help"}]}'
+```
+
+`docker compose logs phigate` shows the audit record for that request — which
+rules fired, where it was routed, and why. The dashboard is at
+[localhost:8080/dashboard](http://localhost:8080/dashboard), metrics at
+[localhost:9090](http://localhost:9090).
+
+To reproduce the published benchmark, or to measure your own logs:
+
+```bash
+scripts/fetch-benchmark-corpus.sh              # eval/corpus is fetched, not vendored
+docker compose run --rm bench                  # the table above
+docker compose run --rm -v /var/log:/data:ro bench -dir /data   # your data
+```
+
+Add a cloud model when you want to compare against one:
+`PHIGATE_CLOUD_API_KEY=sk-... PHIGATE_CLOUD_MAX_SENSITIVITY=internal docker compose up`.
+
+### Or run the gateway alone
+
 ```bash
 docker run -p 8080:8080 \
   -e PHIGATE_API_KEYS="my-client-key:team-sre" \

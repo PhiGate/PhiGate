@@ -12,6 +12,31 @@ read.
 
 ## [Unreleased]
 
+### Added
+
+- **`docker-compose.yml` — a one-command evaluation stack.** PhiGate, a local
+  Phi-4-mini on Ollama (pulled by an init service, so the first request cannot
+  fail with a model-not-found), and Prometheus. **No cloud API key is required
+  and no cloud LLM is contacted**: the stack sets
+  `PHIGATE_CLOUD_MAX_SENSITIVITY=low` and disables cloud fallback, so anything
+  carrying a hostname, an IP or a path is confined to the local model by
+  `internal/policy` rather than by configuration convention.
+
+  This closes the gap between what the README asks a reader to do — run it on
+  your own logs and check the numbers — and what that actually cost them: a Go
+  toolchain, a C compiler for tree-sitter, an Ollama install, a model pull and a
+  Prometheus wiring, none of which say anything about whether the product works.
+  The compose file uses the published `ghcr.io` image, so neither the toolchain
+  nor the compiler is in the path of a first evaluation.
+
+  An opt-in `bench` profile runs `phigate-eval bench` against the public LogHub
+  corpus or a bind-mounted directory of your own logs.
+
+- **`deploy/prometheus.yml`** for that stack. It carries the demo bearer
+  credential because `/metrics` sits behind the same authentication as the rest
+  of the API — per-rule block counts and token totals describe traffic through a
+  data-protection boundary, and are not something to serve unauthenticated.
+
 ## [0.2.0] — 2026-08-23
 
 Structural only. **No change to what the gateway detects, blocks, or lets leave

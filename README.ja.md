@@ -119,6 +119,42 @@ rm --force --recursive /                  → ブロック（正規表現方式�
 
 ## クイックスタート
 
+**クラウド API キーなし、データを外に出さずに、コマンド 1 つで評価できます。**
+
+```bash
+docker compose up
+```
+
+PhiGate と、ローカルの Phi-4-mini（[Ollama](https://ollama.com) 上に自動で取得）
+と Prometheus が起動します。外部送信の上限は `low` に設定してあるため、ホスト名・
+IP・パスを含むデータは「そう運用する」のではなく
+[`internal/policy`](internal/policy/) によってローカルモデルに固定されます。
+
+```bash
+curl localhost:8080/v1/chat/completions \
+  -H 'Authorization: Bearer demo-key' -H 'Content-Type: application/json' \
+  -d '{"model":"phi4-mini","messages":[
+        {"role":"user","content":"nginx upstream timeout to 10.24.8.19, help"}]}'
+```
+
+`docker compose logs phigate` で、そのリクエストの監査ログ — どのルールが発火し、
+どこへ振り分け、その理由は何か — を確認できます。ダッシュボードは
+[localhost:8080/dashboard](http://localhost:8080/dashboard)、メトリクスは
+[localhost:9090](http://localhost:9090) です。
+
+公開ベンチマークの再現、および自社ログでの測定:
+
+```bash
+scripts/fetch-benchmark-corpus.sh              # eval/corpus は同梱せず取得する方式
+docker compose run --rm bench                  # 上記の表の数値
+docker compose run --rm -v /var/log:/data:ro bench -dir /data   # 自社データ
+```
+
+クラウドモデルと比較したくなった時点で追加してください:
+`PHIGATE_CLOUD_API_KEY=sk-... PHIGATE_CLOUD_MAX_SENSITIVITY=internal docker compose up`
+
+### ゲートウェイ単体で動かす場合
+
 ```bash
 docker run -p 8080:8080 \
   -e PHIGATE_API_KEYS="my-client-key:team-sre" \
