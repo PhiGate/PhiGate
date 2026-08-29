@@ -58,14 +58,47 @@ func TestScannerTransformsBeforeInspect(t *testing.T) {
 	}
 }
 
-func TestScannerHoldsPartialLineUntilClose(t *testing.T) {
+// Prose is released as it arrives. Holding it to a newline is what made a
+// single-paragraph answer arrive in one burst at the end of the stream.
+func TestScannerReleasesProseBeforeNewline(t *testing.T) {
 	sc, safe, _ := collect(nil)
-	_ = sc.Write("partial without newline")
+	_ = sc.Write("the upstream timed out ")
+	if safe.String() == "" {
+		t.Fatal("prose should not wait for a newline")
+	}
+	_ = sc.Write("after three retries")
+	_ = sc.Close()
+	if got := safe.String(); got != "the upstream timed out after three retries" {
+		t.Fatalf("prose altered in transit: %q", got)
+	}
+}
+
+// A partial line that could still be read as a command is held, because the
+// guard's verdict on it is not settled until the line ends.
+func TestScannerHoldsPartialCommandUntilClose(t *testing.T) {
+	sc, safe, _ := collect(nil)
+	_ = sc.Write("systemctl status nginx")
 	if safe.String() != "" {
-		t.Fatalf("partial line should be held, got %q", safe.String())
+		t.Fatalf("a partial command line should be held, got %q", safe.String())
 	}
 	_ = sc.Close()
-	if safe.String() != "partial without newline" {
-		t.Fatalf("Close should flush partial, got %q", safe.String())
+	if safe.String() != "systemctl status nginx" {
+		t.Fatalf("Close should flush the held line, got %q", safe.String())
+	}
+}
+
+// The tail holdback covers a placeholder still in flight: releasing "<V" and
+// then "1>" separately would hydrate neither.
+func TestScannerHoldsPartialPlaceholder(t *testing.T) {
+	transform := func(s string) string { return strings.ReplaceAll(s, "<V1>", "10.0.0.1") }
+	sc, safe, _ := collect(transform)
+	_ = sc.Write("the host is <V")
+	if strings.Contains(safe.String(), "<V") {
+		t.Fatalf("half a placeholder escaped: %q", safe.String())
+	}
+	_ = sc.Write("1> exactly")
+	_ = sc.Close()
+	if got := safe.String(); !strings.Contains(got, "10.0.0.1") {
+		t.Fatalf("placeholder not hydrated across the split: %q", got)
 	}
 }

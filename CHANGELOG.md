@@ -12,6 +12,55 @@ read.
 
 ## [Unreleased]
 
+### Security
+
+- **A streamed answer is now guarded exactly as a non-streamed one.** This
+  changes **what is blocked**, and is the entry on this page an operator has to
+  re-approve rather than merely read.
+
+  The streaming scanner inspected model output one line at a time, and
+  `extractExecutable` rebuilds its code-fence state on every call. A line handed
+  to it individually was therefore inspected with no knowledge that it sat
+  inside a fence, and fell through to the outside-a-fence path. The blocking
+  path inspects the whole hydrated answer, where a fence body arrives as one
+  code segment.
+
+  The two paths could consequently reach different verdicts on the same answer,
+  and which one applied depended on whether the client sent `"stream": true` — a
+  performance preference, not a security decision, and not visible in an audit
+  log afterwards. Confirmed reachable for any rule matching across lines within
+  a fence, including `fork_bomb` and `dd_to_device`.
+
+  The scanner now carries fence state across writes and inspects a fenced block
+  as one segment. That the two paths agree is asserted in
+  `internal/sandbox/parity_test.go` and is part of `make guarantees`; the
+  agreement is checked byte-by-byte, at every split boundary, and under fuzzing.
+
+- **A response can no longer hold the scanner's buffer open without bound.** A
+  code fence the model never closes — truncated, or injected into emitting an
+  endless block — previously grew the held text indefinitely, as did a line with
+  no newline in it. `PHIGATE_STREAM_MAX_BUFFER` (1 MiB) now bounds it. Reaching
+  the bound releases nothing unvetted: the held text is inspected as a code
+  segment and released early rather than dumped, and a stream still growing after
+  that is sealed.
+
+### Changed
+
+- **Prose streams as it arrives.** The scanner released nothing until it saw a
+  newline, so an answer written as a single paragraph — the ordinary shape of a
+  short AIOps answer — was buffered end to end, and an endpoint that is
+  nominally streaming behaved like a blocking one.
+
+  Text is now released as soon as no continuation of the stream could change the
+  guard's verdict on it: prose immediately, a line that could be read as a
+  command at its newline, a fenced block when the fence closes. Ambiguity holds
+  — an unbalanced quote, an open `$(`, a line continuation or a token that could
+  still grow into a command name all keep the text held, so obfuscation costs an
+  attacker latency and buys them nothing.
+
+  `PHIGATE_STREAM_MODE=strict` restores whole-answer buffering for deployments
+  that prefer it. Both modes give the same verdict; they differ only in latency.
+
 ### Added
 
 - **`docker-compose.yml` — a one-command evaluation stack.** PhiGate, a local

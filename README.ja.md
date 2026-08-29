@@ -25,6 +25,7 @@ PhiGate の 2 つの訴求点はいずれも実測できる性質のものです
 | 設定した機密度を超えるデータは、障害時であってもクラウドへ出ない | [`internal/policy`](internal/policy/) | `go test ./internal/policy/` |
 | 破滅的なコマンドが運用者に届くことはない | [`internal/sandbox`](internal/sandbox/) | `go test ./internal/sandbox/` |
 | ガードレールが通常の文章を誤ってブロックしない | 同上 | `-run TestGuardDoesNotBlockProse` |
+| ストリーミング応答も非ストリーミング応答とまったく同じ基準で検査される | [`internal/sandbox`](internal/sandbox/) | `go test ./internal/sandbox/ -run TestStreamingAgrees` |
 | キャッシュが他セッションの値を渡すことはない | [`internal/cache`](internal/cache/) | `go test ./internal/gateway/ -run Cache` |
 | 監査ログに生の機微データが含まれない | [`internal/audit`](internal/audit/) | `Event` 型に値を保持できる項目が存在しない |
 

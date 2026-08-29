@@ -79,6 +79,14 @@ type Config struct {
 	IngressScan    bool
 	Enumeration    sandbox.EnumerationThreshold
 
+	// StreamMode selects how much of a streaming answer the egress scanner
+	// releases before the answer ends. The default releases prose as it
+	// arrives and holds anything whose verdict is unsettled; "strict" holds
+	// the whole answer and inspects it once, giving up streaming entirely.
+	StreamMode sandbox.Mode
+	// StreamMaxBuffer bounds the text held for an unterminated code fence.
+	StreamMaxBuffer int
+
 	// --- Sessions and cache ---
 
 	SessionTTL      time.Duration
@@ -183,6 +191,14 @@ func FromEnv() (Config, error) {
 	if v := envInt("PHIGATE_ENUMERATION_MIN_DICT", c.Enumeration.MinDictionary); v > 0 {
 		c.Enumeration.MinDictionary = v
 	}
+	if s := os.Getenv("PHIGATE_STREAM_MODE"); s != "" {
+		m, ok := sandbox.ParseMode(s)
+		if !ok {
+			return c, fmt.Errorf("invalid stream mode %q (want commit|strict)", s)
+		}
+		c.StreamMode = m
+	}
+	c.StreamMaxBuffer = envInt("PHIGATE_STREAM_MAX_BUFFER", sandbox.DefaultMaxBuffer)
 
 	// --- Sessions and cache ---
 	c.SessionTTL = envDuration("PHIGATE_SESSION_TTL", 30*time.Minute)

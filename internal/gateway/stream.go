@@ -18,9 +18,11 @@ import (
 // egress sandbox inspects every line.
 //
 // Output is hydrated and vetted before it reaches the client; a blocked command
-// is replaced by a notice and the rest of the stream is sealed off. Because the
-// scanner buffers whole lines, a command split across SSE chunks ("rm -r" then
-// "f /") is still inspected as one unit.
+// is replaced by a notice and the rest of the stream is sealed off. The scanner
+// holds text until releasing it can no longer change the guard's verdict, so a
+// command split across SSE chunks ("rm -r" then "f /") is still inspected as one
+// unit, and a fenced code block is inspected as one segment — the same unit the
+// blocking path sees.
 func (g *Gateway) streamResponse(w http.ResponseWriter, r *http.Request, p *requestPlan, req *types.ChatCompletionRequest) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -99,7 +101,8 @@ func (g *Gateway) streamResponse(w http.ResponseWriter, r *http.Request, p *requ
 
 // newScanner wires the egress guard, hydration and enumeration check into the
 // streaming path, so a streamed answer gets exactly the same treatment as a
-// blocking one.
+// blocking one. That the two agree is asserted in the sandbox package's
+// parity_test.go, not merely intended here.
 func (g *Gateway) newScanner(p *requestPlan, sw *sseWriter) *sandbox.StreamScanner {
 	hydrate := func(line string) string {
 		out, report := p.sess.Dict.HydrateReport(line)
@@ -109,7 +112,7 @@ func (g *Gateway) newScanner(p *requestPlan, sw *sseWriter) *sandbox.StreamScann
 		}
 		return out
 	}
-	return sandbox.NewStreamScanner(g.guard, hydrate,
+	return sandbox.NewStreamScannerWith(g.guard, hydrate,
 		func(safe string) error { return sw.emit(safe, "") },
 		func(v sandbox.Verdict) error {
 			g.metrics.blocked.Inc(v.Rule, v.Severity.String())
@@ -120,7 +123,8 @@ func (g *Gateway) newScanner(p *requestPlan, sw *sseWriter) *sandbox.StreamScann
 			sw.meta.EgressSeverity = v.Severity.String()
 			sw.header("X-PhiGate-Blocked", v.Rule)
 			return sw.emit("\n"+blockedNotice(v)+"\n", "content_filter")
-		})
+		},
+		sandbox.Options{Mode: g.cfg.StreamMode, MaxBuffer: g.cfg.StreamMaxBuffer})
 }
 
 // streamCached replays a cached answer as SSE, hydrated for this session.

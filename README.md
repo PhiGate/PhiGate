@@ -25,6 +25,7 @@ they stop being true. Run them yourself:
 | Data above your sensitivity limit never reaches the cloud, even on failure | [`internal/policy`](internal/policy/) | `go test ./internal/policy/` |
 | Catastrophic commands never reach the operator | [`internal/sandbox`](internal/sandbox/) | `go test ./internal/sandbox/` |
 | The guard does **not** block ordinary prose | same | `-run TestGuardDoesNotBlockProse` |
+| A streamed answer is guarded exactly as a non-streamed one | [`internal/sandbox`](internal/sandbox/) | `go test ./internal/sandbox/ -run TestStreamingAgrees` |
 | The cache never serves one session's values to another | [`internal/cache`](internal/cache/) | `go test ./internal/gateway/ -run Cache` |
 | Audit records contain no raw values | [`internal/audit`](internal/audit/) | the `Event` type has no field that can hold one |
 
