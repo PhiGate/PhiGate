@@ -201,10 +201,15 @@ func (s *StreamScanner) feedLine(line string) error {
 		return s.enforceMaxBuffer()
 	}
 
-	if m := fenceStart(trimmed); m != "" {
+	// A fence opens only at the start of a line. If part of this line has
+	// already been released then we are mid-line, and a "```" here is ordinary
+	// text — extractExecutable would read it that way too, because it sees the
+	// whole line at once. Missing this check let fuzzing construct
+	// "0000 000```\nmkfs0 /dev/", where the streamed path opened a fence the
+	// blocking path never saw and then blocked code the blocking path allows.
+	if m := fenceStart(trimmed); m != "" && s.head.Len() == 0 {
 		s.inFence = true
 		s.marker = m
-		s.head.Reset()
 		s.held.WriteString(line)
 		return nil
 	}
@@ -353,17 +358,24 @@ func commitIndex(partial string) int {
 
 	// A line that has not yet shown its first space could still turn out to be
 	// anything, including a fence opener.
-	lead := strings.TrimLeft(partial, " \t")
+	lead := strings.TrimLeft(partial, " \t\r\n\v\f")
 	if strings.HasPrefix(lead, "`") || strings.HasPrefix(lead, "~") {
 		return 0
 	}
-	i := strings.IndexAny(partial, " \t")
+	// Decide on the same text the guard decides on. commandLine trims the line
+	// before lexing it, so a leading "\r" — which IndexAny(" \t") does not treat
+	// as whitespace — made "\rrm -r /" lex as the unknown program "\rrm" here
+	// while the guard read it as "rm". The prefix was released, and inspecting
+	// it alone blocked "rm -r /" even though the eventual line "rm -r /00000000"
+	// is allowed. Fuzzing found it; the trim keeps the two readings identical.
+	trimmed := strings.TrimLeft(partial, " \t\r\n\v\f")
+	i := strings.IndexAny(trimmed, " \t")
 	if i < 0 {
 		return 0
 	}
 
-	first := strings.TrimSpace(partial[:i])
-	if isPromptOrListMarker(first) || couldStartSQL(first) || mayBeCommand(partial) {
+	first := strings.TrimSpace(trimmed[:i])
+	if isPromptOrListMarker(first) || couldStartSQL(first) || mayBeCommand(trimmed) {
 		return 0 // this line may yet be read as a command; hold it whole
 	}
 
@@ -445,14 +457,21 @@ var binaryPrefixes = sync.OnceValue(func() map[string]bool {
 	return p
 })
 
-// couldStartSQL reports whether a first token could begin the bare-SQL pattern,
-// which is anchored at the start of a line.
+// couldStartSQL reports whether a first token begins the bare-SQL pattern,
+// which [sqlStatementPattern] anchors at the start of a line.
+//
+// The comparison is exact, not a prefix match. commitIndex only calls this with
+// a token that whitespace has already closed, so the token cannot still grow
+// into a keyword — and matching prefixes there was a real defect: "a" is a
+// prefix of "alter", so the single commonest word in English prose held the
+// rest of its line, silently restoring the buffering this scanner exists to
+// remove. Where a token genuinely can still grow, the growth is handled by
+// commitIndex holding until the first space arrives, and by mayBeCommand's
+// explicit growing check.
 func couldStartSQL(tok string) bool {
-	lower := strings.ToLower(tok)
-	for _, kw := range []string{"drop", "truncate", "delete", "update", "alter", "grant", "revoke"} {
-		if strings.HasPrefix(kw, lower) || lower == kw {
-			return true
-		}
+	switch strings.ToLower(tok) {
+	case "drop", "truncate", "delete", "update", "alter", "grant", "revoke":
+		return true
 	}
 	return false
 }

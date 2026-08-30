@@ -74,6 +74,14 @@ services:
       PHIGATE_LOCAL_BASE_URL: http://ollama:11434/v1
       PHIGATE_LOCAL_MODEL: ${PHIGATE_LOCAL_MODEL:-phi4-mini}
 
+      # Generous, because this stack has no GPU reservation and therefore runs
+      # the model on CPU. Measured here: phi4-mini generates at ~3.9 tokens/s
+      # on CPU, so a 350-token answer takes about 90 seconds and a longer one
+      # exceeds the 120s default — the gateway then reports "upstream backend
+      # unavailable" and an evaluator concludes PhiGate is broken when it is
+      # the model that is slow. Lower it once you point this at a GPU host.
+      PHIGATE_LOCAL_TIMEOUT: ${PHIGATE_LOCAL_TIMEOUT:-600s}
+
       # Why this stack needs no cloud key.
       #
       # `low` confines anything classified above low sensitivity to the local

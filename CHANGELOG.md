@@ -12,6 +12,65 @@ read.
 
 ## [Unreleased]
 
+## [0.3.1] — 2026-08-30
+
+Fixes three defects in 0.3.0's streaming scanner, all found by running the
+gateway against a real model rather than a test double. **No change to what is
+blocked** — the guarantee suite and the split-boundary fuzzing agree with 0.3.0
+on every verdict; what changes is when text is released, and two cases where
+0.3.0 blocked something the non-streaming path allows.
+
+### Fixed
+
+- **Prose stopped streaming after the first "a".** 0.3.0's headline claim was
+  that prose is released as it arrives, and 0.3.0 did not deliver it. The
+  bare-SQL check matched a *prefix* of a keyword against the first token of a
+  held segment, and `"a"` is a prefix of `"alter"` — so the commonest word in
+  English held the rest of its line to the newline. Measured against a real
+  phi4-mini answer of 605 characters with no newline: **4 released pieces
+  before, 99 after**; through the full gateway, **2 SSE frames before, 30
+  after**.
+
+  The check now compares exactly, which is what `sqlStatementPattern` requires
+  anyway — it is anchored at line start and needs the keyword followed by
+  whitespace. The token being tested has already been closed by whitespace, so
+  it cannot still grow into a keyword.
+
+  The verdict-parity tests could not see this: a scanner that reaches the right
+  verdict while holding the whole answer passes every one of them. There are now
+  tests asserting release *granularity*, which is the property an operator
+  perceives as streaming.
+
+- **A "```" in the middle of a line opened a code fence.** A fence opens only at
+  the start of a line, but once part of a line had been released the scanner
+  treated what remained as a fresh line. Fuzzing built
+  `"0000 000```\nmkfs0 /dev/"`, where the streamed path opened a fence the
+  blocking path never saw and blocked code the blocking path allows. Fence
+  detection now requires that nothing of the current line has been released.
+
+- **A leading carriage return hid a command from the commit rule.** The guard
+  trims a line before lexing it; the commit rule used `IndexAny(" \t")`, which
+  does not treat `\r` as whitespace. So `"\rrm -r /"` lexed as the unknown
+  program `"\rrm"` here and as `"rm"` in the guard — the prefix was released,
+  and inspecting it alone blocked `"rm -r /"` even though the full line
+  `"rm -r /00000000"` is allowed. Both readings now normalise identically.
+
+- **The evaluation stack timed out on its first request.** `docker-compose.yml`
+  has no GPU reservation, so the model runs on CPU, where phi4-mini generates at
+  about 3.9 tokens/s — a 350-token answer takes ~90s and a longer one exceeds
+  the 120s default upstream timeout. The gateway then reported "upstream backend
+  unavailable", which reads as PhiGate being broken when it is the model being
+  slow. The stack now sets `PHIGATE_LOCAL_TIMEOUT` (600s), overridable.
+
+### Known issues
+
+- **The published container image is not publicly pullable.** The GHCR package
+  is private, so `docker run ghcr.io/phigate/phigate:latest` and
+  `docker compose up` both fail with `unauthorized` for anyone outside the
+  organisation — including the quick start in both READMEs. Making the package
+  public is a registry setting, not a code change; until it is changed, build
+  locally with `docker compose up --build`.
+
 ## [0.3.0] — 2026-08-30
 
 Two defects in the streaming egress path, and the evaluation on-ramp that was
@@ -315,7 +374,8 @@ anyone who clones the repository.
   no credential-shaped literal exists in the repository. `TestNoLiteralCredentialsInCorpus`
   enforces this for future contributors.
 
-[Unreleased]: https://github.com/phigate/phigate/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/phigate/phigate/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/phigate/phigate/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/phigate/phigate/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/phigate/phigate/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/phigate/phigate/releases/tag/v0.1.0
