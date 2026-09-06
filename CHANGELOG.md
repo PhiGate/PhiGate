@@ -38,6 +38,18 @@ read.
   CE's ledger now accounts per tenant, so budgets work there too — honestly for
   as long as the process lives, and reset by a rolling update.
 
+- **Enterprise edition: Japanese name detection** (`ee/redact/slm`), the third
+  seam. `jp.json` disables its own `jp_name_kanji` rule and explains that
+  free-form kanji names cannot be decided by pattern; a surname gazetteer now
+  finds candidates and the *local* model decides which are people — local
+  always, because a detector looking for personal data cannot send the text to a
+  cloud provider to find out whether it contains any. It composes with CE's
+  engine rather than replacing it, so EE can never detect less than CE; the
+  community leak corpus is run through it against a recognizer that claims every
+  candidate, which is the adversarial case for that property. A slow or
+  unavailable model degrades to CE-only detection and counts the degradation,
+  rather than failing the request.
+
 - **Enterprise edition: a durable token ledger** (`ee/tokens/durable`), the
   second seam. Per-tenant consumption survives a restart, which is what turns
   CE's best-effort budget into a monthly limit that is actually monthly. Spend

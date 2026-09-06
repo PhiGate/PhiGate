@@ -32,6 +32,7 @@ import (
 	"os"
 
 	"github.com/phigate/phigate/ee/audit/worm"
+	"github.com/phigate/phigate/ee/redact/slm"
 	"github.com/phigate/phigate/ee/tokens/durable"
 	"github.com/phigate/phigate/internal/config"
 	"github.com/phigate/phigate/internal/gateway"
@@ -131,10 +132,15 @@ func main() {
 			path, cfg.BudgetPeriod, cfg.BudgetTimezone)
 	}
 
-	// Still to land, each substituting a seam CE already declares:
+	if os.Getenv("PHIGATE_EE_NAME_DETECTION") == "true" {
+		log.Printf("  name detection : on (local model %s, composed with the regex engine)",
+			cfg.Local.Model)
+	}
+
+	// Still to land, substituting the one seam CE declares that is not yet
+	// filled:
 	//
 	//	g.SetCache(semantic.New(...))   // embedded HNSW tier, via cache.ProbeStore
-	//	detector                        // dictionary/SLM-backed, composed with CE's
 
 	srv := gateway.NewServer(cfg, g)
 	log.Printf("phigate-ee listening on %s", srv.Addr)
@@ -201,5 +207,21 @@ func verifyAudit(args []string) error {
 // resolved and exercised, and the day a dictionary- or SLM-backed detector
 // lands it is composed here and nothing else in this file changes.
 func enterpriseDetector(cfg config.Config) (redact.Detector, error) {
-	return gateway.BuildRedactEngine(cfg)
+	engine, err := gateway.BuildRedactEngine(cfg)
+	if err != nil {
+		return nil, err
+	}
+	if os.Getenv("PHIGATE_EE_NAME_DETECTION") != "true" {
+		return engine, nil
+	}
+
+	// The adjudicating model is the *local* one, always. A detector whose job
+	// is to find personal data cannot send the text it is inspecting to a cloud
+	// provider in order to decide whether it contains personal data — that is
+	// the exfiltration the gateway exists to prevent, performed by the gateway.
+	local := llm.NewClient(gateway.BackendConfig("local", cfg.Local, cfg))
+	return slm.New(slm.Options{
+		Engine:     engine,
+		Recognizer: slm.NewModelRecognizer(local, cfg.Local.Model),
+	})
 }

@@ -88,8 +88,8 @@ persists or shares hydrated text serves one session's real values to another.
 |---|---|
 | `audit.Sink` — tamper-evident chain | **implemented**, `ee/audit/worm` |
 | `tokens.LedgerStore` — durable per-tenant quota | **implemented**, `ee/tokens/durable` |
+| `redact.Detector` — gazetteer + model-backed JP names | **implemented**, `ee/redact/slm` |
 | `cache.Store` — semantic tier | not yet |
-| `redact.Detector` — dictionary/SLM-backed | not yet |
 
 `phigate-ee` serves once it has at least one enterprise implementation to offer,
 and refuses without one: it requires `PHIGATE_EE_AUDIT_DIR`, because a binary
@@ -169,6 +169,41 @@ Periods reset in `budget_timezone`, which defaults to `Asia/Tokyo` rather than
 UTC because a budget period is a billing period and a Japanese customer's month
 ends at midnight JST — a boundary computed in UTC puts nine hours of every
 month-end in the wrong month.
+
+### Japanese name detection
+
+`jp.json` disables its own `jp_name_kanji` rule by default and says why:
+"free-form kanji names cannot be detected reliably by pattern alone". That is
+not a missing rule, it is a class of value a regex cannot decide — 田中 is a
+surname, a place, and part of ordinary words, and which one depends on the
+sentence.
+
+```sh
+PHIGATE_EE_NAME_DETECTION=true phigate-ee
+```
+
+A surname gazetteer finds candidates; the **local** model decides which are
+people. Two stages because asking a model about every span of every request
+would put an inference in the request path for text containing no name at all,
+which is most text — and the gazetteer is high-recall, low-precision on purpose:
+masking on its output alone would be exactly the over-masking `jp.json`
+declined to ship.
+
+The model is always the local one. A detector whose job is to find personal data
+cannot send the text it is inspecting to a cloud provider in order to decide
+whether it contains personal data.
+
+**Composition, never replacement.** CE's engine runs first and every finding it
+produces is kept; a model-backed finding is accepted only where CE claimed
+nothing. So EE can never detect less than CE, and a conflict resolves in favour
+of the deterministic, check-digit-validated rule. The community edition's own
+leak corpus is run through this detector by `ee/redact/slm`'s tests, against a
+recognizer that greedily claims every candidate it is offered — the adversarial
+case for the property.
+
+If the model is slow or unavailable, detection falls back to CE's engine alone
+and the request succeeds. `Stats().Degraded` counts those, because a silent
+degradation is one nobody can alert on.
 
 Run the Community Edition instead if you do not need these: `cmd/phigate`. CE
 enforces the same budgets against its in-memory ledger, which is honest for as
