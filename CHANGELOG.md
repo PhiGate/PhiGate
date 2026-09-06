@@ -14,6 +14,19 @@ read.
 
 ### Added
 
+- **Enterprise edition: a tamper-evident audit chain** (`ee/audit/worm`), the
+  first of the four seams to be implemented. Every record carries the hash of
+  the one before it, so altering, removing or inserting a record breaks the
+  linkage and `phigate-ee audit verify` reports the segment, line and sequence
+  number where. It does not prevent tampering — nothing on the same machine as
+  the file can — it makes tampering evident, which is what an ISMS, FISC or APPI
+  audit is actually asking for. It never blocks the request path: a full queue
+  drops records and writes a *gap record* into the chain saying how many, since
+  a silent jump in sequence numbers is indistinguishable from a deletion. A
+  restart continues the existing chain rather than starting a second one, and
+  retention refuses to remove a segment younger than the configured period, with
+  a zero retention deleting nothing.
+
 - **A JSON configuration file**, named by `PHIGATE_CONFIG`. Precedence is
   defaults, then file, then environment: the file is the declared state you
   version-control, and the environment is where secrets live and where an

@@ -84,13 +84,54 @@ persists or shares hydrated text serves one session's real values to another.
 
 ## Status
 
-Nothing is implemented yet. `phigate-ee` builds, resolves the seams, and then
-**refuses to serve** — shipping CE under an EE name would be a lie told to
-whoever runs it. The binary exists now because it is the compile-time proof that
-a nested module can import the parent module's `internal/` packages, which is
-the assumption the entire layout rests on.
+| Seam | Status |
+|---|---|
+| `audit.Sink` — tamper-evident chain | **implemented**, `ee/audit/worm` |
+| `tokens.LedgerStore` — durable per-tenant quota | not yet |
+| `cache.Store` — semantic tier | not yet |
+| `redact.Detector` — dictionary/SLM-backed | not yet |
 
-Run the Community Edition: `cmd/phigate`.
+`phigate-ee` serves once it has at least one enterprise implementation to offer,
+and refuses without one: it requires `PHIGATE_EE_AUDIT_DIR`, because a binary
+that fell back to CE's file logger would be the community edition under an
+enterprise name, which is a lie told to whoever runs it.
+
+### The audit chain
+
+Every record carries the hash of the record before it. Altering a record,
+removing one, or inserting one breaks the linkage, and verification reports the
+segment, line and sequence number where. This does not *prevent* tampering —
+nothing running on the same machine as the file can — it makes tampering
+evident, which is the question an ISMS, FISC or APPI audit actually asks and the
+one a plain log file cannot answer.
+
+```sh
+PHIGATE_EE_AUDIT_DIR=/var/lib/phigate/audit \
+PHIGATE_EE_AUDIT_RETENTION=2160h \
+  phigate-ee
+
+phigate-ee audit verify -dir /var/lib/phigate/audit
+```
+
+Verification is a subcommand rather than an endpoint, because an auditor
+checking a log should not have to trust, or even reach, the process that wrote
+it. It exits non-zero on a break.
+
+Three properties worth knowing before it is put in front of a customer:
+
+- **It never blocks the request path.** `audit.Sink`'s contract says a
+  destination that stalls must drop or buffer, never wait, so writes go through
+  a bounded queue. When that queue fills, records are dropped — and a *gap
+  record* goes into the chain saying how many. A silent jump in sequence numbers
+  is indistinguishable from a deletion, which would defeat the point.
+- **A restart continues the chain**, rather than starting a second one that
+  would look exactly like the log having been replaced.
+- **Retention refuses as well as deletes.** `Prune` removes only expired
+  segments and declines anything younger, because "records are kept for N years
+  and cannot be removed sooner" is what a retention requirement actually says. A
+  zero retention — the default — deletes nothing at all.
+
+Run the Community Edition instead if you do not need these: `cmd/phigate`.
 
 ## Building
 
