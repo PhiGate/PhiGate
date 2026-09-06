@@ -24,6 +24,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -35,6 +36,7 @@ import (
 
 	"github.com/phigate/phigate/internal/compressor"
 	"github.com/phigate/phigate/internal/redact"
+	"github.com/phigate/phigate/internal/router"
 	"github.com/phigate/phigate/internal/tokens"
 )
 
@@ -68,6 +70,8 @@ func usage() {
 
   bench  -dir <path>            token reduction per pipeline stage over a corpus
   eval   -cases <file.json>     answer quality: raw cloud vs through PhiGate, judged
+         -dry-run               print the call count, token estimate and bill; call nothing
+         -repeat N              runs per case; one score is a sample, not a measurement
   cache  -dir <path>            template cache hit rate, and the headroom a
                                 semantic tier would have to beat
   leak   -dir <path>            assert no secret in a corpus survives redaction
@@ -448,6 +452,11 @@ type evalCase struct {
 type String = string
 
 type evalResult struct {
+	// Runs is how many times the case was scored, and RawSD/GatedSD the
+	// spread across them. A delta smaller than the spread is judge noise.
+	Runs         int     `json:"runs"`
+	RawSD        float64 `json:"raw_score_sd"`
+	GatedSD      float64 `json:"gated_score_sd"`
 	Name         string  `json:"name"`
 	RawScore     float64 `json:"raw_score"`
 	GatedScore   float64 `json:"phigate_score"`
@@ -468,8 +477,14 @@ func runEval(args []string) error {
 	baselineKey := fs.String("baseline-key", os.Getenv("OPENAI_API_KEY"), "baseline API key")
 	model := fs.String("model", "gpt-4o", "model to answer with")
 	judgeModel := fs.String("judge", "gpt-4o", "model to score answers")
+	repeat := fs.Int("repeat", 1, "runs per case; a single score is a sample, not a measurement")
+	dryRun := fs.Bool("dry-run", false, "print the call count, token estimate and bill, and make no API calls")
+	priceBook := fs.String("price-book", "", "JSON price book for the -dry-run estimate")
 	jsonOut := fs.Bool("json", false, "emit JSON instead of a table")
 	_ = fs.Parse(args)
+	if *repeat < 1 {
+		*repeat = 1
+	}
 
 	if *cases == "" {
 		return fmt.Errorf("-cases is required")
@@ -489,43 +504,66 @@ func runEval(args []string) error {
 	}
 
 	counter := tokens.NewHeuristic()
+
+	if *dryRun {
+		return dryRunEval(doc.Cases, counter, *model, *judgeModel, *repeat, *priceBook)
+	}
+
 	ctx := context.Background()
 	results := make([]evalResult, 0, len(doc.Cases))
 
 	for _, c := range doc.Cases {
-		// Baseline: the raw prompt straight to the cloud model — what the
-		// enterprise does today, without PhiGate.
-		rawAnswer, _, err := ask(ctx, *baseline, *baselineKey, *model, c.Prompt)
-		if err != nil {
-			return fmt.Errorf("baseline %s: %w", c.Name, err)
-		}
-		// Through PhiGate: compressed, anonymised, routed.
-		gatedAnswer, hdr, err := ask(ctx, *gateway, *gatewayKey, *model, c.Prompt)
-		if err != nil {
-			return fmt.Errorf("phigate %s: %w", c.Name, err)
+		// Every case is run -repeat times. A judge model is not deterministic,
+		// so one score per case is a sample and reporting it as a measurement
+		// is how a benchmark ends up describing its own noise.
+		var rawScores, gatedScores []float64
+		var comment, route string
+		var rawTok, gatedTok int
+
+		for range *repeat {
+			// Baseline: the raw prompt straight to the cloud model — what the
+			// enterprise does today, without PhiGate.
+			rawAnswer, _, err := ask(ctx, *baseline, *baselineKey, *model, c.Prompt)
+			if err != nil {
+				return fmt.Errorf("baseline %s: %w", c.Name, err)
+			}
+			// Through PhiGate: compressed, anonymised, routed.
+			gatedAnswer, hdr, err := ask(ctx, *gateway, *gatewayKey, *model, c.Prompt)
+			if err != nil {
+				return fmt.Errorf("phigate %s: %w", c.Name, err)
+			}
+
+			rawScore, cmt, err := judge(ctx, *baseline, *baselineKey, *judgeModel, c, rawAnswer)
+			if err != nil {
+				return fmt.Errorf("judge baseline %s: %w", c.Name, err)
+			}
+			gatedScore, _, err := judge(ctx, *baseline, *baselineKey, *judgeModel, c, gatedAnswer)
+			if err != nil {
+				return fmt.Errorf("judge phigate %s: %w", c.Name, err)
+			}
+
+			rawScores = append(rawScores, rawScore)
+			gatedScores = append(gatedScores, gatedScore)
+			comment = cmt
+			route = hdr.Get("X-PhiGate-Route")
+			rawTok = counter.Estimate(c.Prompt)
+			gatedTok = atoiHeader(hdr.Get("X-PhiGate-Tokens-Saved"))
 		}
 
-		rawScore, comment, err := judge(ctx, *baseline, *baselineKey, *judgeModel, c, rawAnswer)
-		if err != nil {
-			return fmt.Errorf("judge baseline %s: %w", c.Name, err)
-		}
-		gatedScore, _, err := judge(ctx, *baseline, *baselineKey, *judgeModel, c, gatedAnswer)
-		if err != nil {
-			return fmt.Errorf("judge phigate %s: %w", c.Name, err)
-		}
-
-		rawTok := counter.Estimate(c.Prompt)
-		gatedTok := atoiHeader(hdr.Get("X-PhiGate-Tokens-Saved"))
 		saving := 0.0
 		if rawTok > 0 {
 			saving = 100 * float64(gatedTok) / float64(rawTok)
 		}
+		rawMean, rawSD := meanSD(rawScores)
+		gatedMean, gatedSD := meanSD(gatedScores)
 
 		results = append(results, evalResult{
-			Name: c.Name, RawScore: rawScore, GatedScore: gatedScore,
-			Delta: gatedScore - rawScore, RawTokens: rawTok,
+			Name: c.Name, Runs: *repeat,
+			RawScore: rawMean, RawSD: rawSD,
+			GatedScore: gatedMean, GatedSD: gatedSD,
+			Delta: gatedMean - rawMean, RawTokens: rawTok,
 			GatedTokens: rawTok - gatedTok, TokenSaving: saving,
-			GatedRoute: hdr.Get("X-PhiGate-Route"), JudgeComment: comment,
+			GatedRoute: route, JudgeComment: comment,
 		})
 	}
 
@@ -533,20 +571,33 @@ func runEval(args []string) error {
 		return json.NewEncoder(os.Stdout).Encode(map[string]any{"results": results})
 	}
 
-	fmt.Printf("\nPhiGate quality evaluation — %d cases, judge=%s\n\n", len(results), *judgeModel)
-	fmt.Printf("  %-24s %8s %8s %8s %10s %8s\n", "CASE", "RAW", "PHIGATE", "DELTA", "SAVED", "ROUTE")
-	fmt.Printf("  %-24s %8s %8s %8s %10s %8s\n", "----", "---", "-------", "-----", "-----", "-----")
-	var sumRaw, sumGated, sumSaving float64
+	fmt.Printf("\nPhiGate quality evaluation — %d cases × %d run(s), judge=%s\n\n",
+		len(results), *repeat, *judgeModel)
+	fmt.Printf("  %-24s %13s %13s %8s %10s %8s\n",
+		"CASE", "RAW", "PHIGATE", "DELTA", "SAVED", "ROUTE")
+	fmt.Printf("  %-24s %13s %13s %8s %10s %8s\n",
+		"----", "---", "-------", "-----", "-----", "-----")
+	var sumRaw, sumGated, sumSaving, maxSD float64
 	for _, r := range results {
-		fmt.Printf("  %-24s %8.2f %8.2f %+8.2f %9.1f%% %8s\n",
-			truncate(r.Name, 24), r.RawScore, r.GatedScore, r.Delta, r.TokenSaving, r.GatedRoute)
+		fmt.Printf("  %-24s %6.2f ±%-5.2f %6.2f ±%-5.2f %+8.2f %9.1f%% %8s\n",
+			truncate(r.Name, 24), r.RawScore, r.RawSD, r.GatedScore, r.GatedSD,
+			r.Delta, r.TokenSaving, r.GatedRoute)
 		sumRaw += r.RawScore
 		sumGated += r.GatedScore
 		sumSaving += r.TokenSaving
+		maxSD = maxFloat(maxSD, maxFloat(r.RawSD, r.GatedSD))
 	}
 	n := float64(len(results))
 	fmt.Printf("\n  mean quality: raw %.2f → PhiGate %.2f (%+.2f)\n", sumRaw/n, sumGated/n, (sumGated-sumRaw)/n)
 	fmt.Printf("  mean prompt-token saving: %.1f%%\n", sumSaving/n)
+	if *repeat == 1 {
+		fmt.Printf("\n  ⚠ One run per case. The ± columns are empty because a single score has\n")
+		fmt.Printf("    no spread — it is a sample, not a measurement. Re-run with -repeat 5\n")
+		fmt.Printf("    before publishing anything from this table.\n")
+	} else if maxSD > 1.0 {
+		fmt.Printf("\n  ⚠ Largest per-case spread is ±%.2f on a 0-10 scale. A delta smaller than\n", maxSD)
+		fmt.Printf("    that is judge noise, not a quality difference.\n")
+	}
 	fmt.Printf("\n  Report both numbers together. A saving figure without the quality\n")
 	fmt.Printf("  figure beside it is the number every buyer already distrusts.\n\n")
 	return nil
@@ -672,3 +723,121 @@ func truncate(s string, n int) string {
 	}
 	return string(r[:n-1]) + "…"
 }
+
+// meanSD returns the mean and population standard deviation of a sample.
+func meanSD(xs []float64) (mean, sd float64) {
+	if len(xs) == 0 {
+		return 0, 0
+	}
+	for _, x := range xs {
+		mean += x
+	}
+	mean /= float64(len(xs))
+	if len(xs) < 2 {
+		return mean, 0
+	}
+	for _, x := range xs {
+		sd += (x - mean) * (x - mean)
+	}
+	return mean, math.Sqrt(sd / float64(len(xs)))
+}
+
+func maxFloat(a, b float64) float64 {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+// dryRunEval prints what a run would cost and where each case would go,
+// without making a single API call.
+//
+// It exists because the eval is the one thing in this repo that spends real
+// money, and "run it and find out" is not an acceptable way to learn the bill.
+// The estimate is deliberately conservative: it assumes every answer is as long
+// as assumedAnswerTokens and that nothing is served from cache.
+func dryRunEval(cases []evalCase, counter tokens.Counter, model, judgeModel string, repeat int, priceBookPath string) error {
+	book := tokens.NewPriceBook()
+	if priceBookPath != "" {
+		if err := book.LoadFile(priceBookPath); err != nil {
+			return err
+		}
+	}
+
+	engine, err := redact.NewEngine(redact.Options{
+		InternalDomains: []string{"internal", "corp", "local", "lan"},
+	})
+	if err != nil {
+		return err
+	}
+	rtr := router.NewHeuristicRouter()
+
+	var answerIn, judgeIn, local int
+	fmt.Printf("\nDry run — %d case(s) × %d run(s), answer=%s judge=%s\n\n",
+		len(cases), repeat, model, judgeModel)
+	fmt.Printf("  %-26s %8s %8s %8s\n", "CASE", "PROMPT", "RUBRIC", "ROUTE")
+	fmt.Printf("  %-26s %8s %8s %8s\n", "----", "------", "------", "-----")
+
+	for _, c := range cases {
+		p := counter.Estimate(c.Prompt)
+		r := counter.Estimate(c.Rubric)
+
+		// Where PhiGate would send it. This is why the two arms are not
+		// comparable by default: a case routed local is answered by a
+		// different model, so the delta measures the model as well as the
+		// pipeline. Pin both backends at the same model to isolate the
+		// pipeline — see the README.
+		pipe := compressor.NewPipelineWith(compressor.NewMaskerWith(engine),
+			compressor.NewDrain(), compressor.NewRefDict(), compressor.NewASTPruner())
+		compressed, err := pipe.Compress(c.Prompt, compressor.NewSession())
+		if err != nil {
+			return err
+		}
+		d, err := rtr.Route(context.Background(), compressed)
+		if err != nil {
+			return err
+		}
+		if d.Target == router.TargetLocal {
+			local++
+		}
+
+		// Per run: one baseline answer, one gated answer, two judge calls.
+		answerIn += repeat * 2 * p
+		judgeIn += repeat * 2 * (p + r + assumedAnswerTokens)
+
+		fmt.Printf("  %-26s %8d %8d %8s\n", truncate(c.Name, 26), p, r, d.Target)
+	}
+
+	calls := len(cases) * repeat * 4
+	answerOut := len(cases) * repeat * 2 * assumedAnswerTokens
+	judgeOut := len(cases) * repeat * 2 * assumedVerdictTokens
+
+	fmt.Printf("\n  API calls           : %d\n", calls)
+	fmt.Printf("  input tokens  (est) : %d\n", answerIn+judgeIn)
+	fmt.Printf("  output tokens (est) : %d\n", answerOut+judgeOut)
+
+	answerPrice, okA := book.Lookup(model)
+	judgePrice, okJ := book.Lookup(judgeModel)
+	if !okA || !okJ {
+		fmt.Printf("\n  No price for %q or %q in the price book, so no estimate.\n", model, judgeModel)
+		fmt.Printf("  Supply one with -price-book; PhiGate's own format is documented in\n")
+		fmt.Printf("  internal/tokens/pricing.go.\n\n")
+		return nil
+	}
+	cost := answerPrice.Cost(answerIn, answerOut) + judgePrice.Cost(judgeIn, judgeOut)
+	fmt.Printf("  estimated cost      : $%.4f\n", cost)
+
+	fmt.Printf("\n  %d of %d case(s) would route to the LOCAL backend, so their PhiGate arm\n", local, len(cases))
+	fmt.Printf("  costs nothing upstream — and is answered by a different model, which the\n")
+	fmt.Printf("  delta then includes. Pin both backends at the same model to measure the\n")
+	fmt.Printf("  pipeline alone.\n")
+	fmt.Printf("\n  Prices come from the built-in price book unless -price-book is given.\n")
+	fmt.Printf("  They change; confirm against your provider before trusting the figure.\n\n")
+	return nil
+}
+
+// The estimator's two assumptions, named rather than buried as literals.
+const (
+	assumedAnswerTokens  = 400
+	assumedVerdictTokens = 60
+)

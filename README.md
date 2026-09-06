@@ -98,20 +98,64 @@ PhiGate is the point of the tool.
 
 ### Answer quality
 
-Not published yet — and deliberately not estimated. Measuring whether compression
-degrades answers requires sending each case to a real model twice, which needs
-API credentials and costs money, so it can only be run by someone with both:
+Not published yet — and deliberately not estimated. It needs API credentials and
+real money, so it can only be run by someone with both. See the bill first:
 
 ```bash
-./bin/phigate-eval eval -cases eval/cases.json \
-  -gateway http://localhost:8080/v1 -gateway-key <key> \
-  -baseline https://api.openai.com/v1 -baseline-key $OPENAI_API_KEY
+./bin/phigate-eval eval -cases eval/cases.json -dry-run -repeat 5
 ```
 
-It answers each case twice — once raw to the cloud model, once through PhiGate —
-and has a judge model score both against a rubric. A savings figure without a
-quality figure beside it is the number every buyer already distrusts, so treat
-the table above as incomplete until this one sits next to it.
+There are **two** questions here, and one number cannot answer both. Run each
+separately, because publishing the second under the first's heading would be
+wrong.
+
+#### (a) Does the pipeline itself degrade answers?
+
+Both arms must use the same model, or the result includes the model change.
+Point the local backend at the cloud one so routing cannot change which model
+answers, and the only variable left is compress → anonymise → hydrate:
+
+```bash
+PHIGATE_LOCAL_BASE_URL=https://api.openai.com/v1 \
+PHIGATE_LOCAL_MODEL=gpt-4o \
+PHIGATE_LOCAL_API_KEY=$OPENAI_API_KEY \
+  ./bin/phigate-eval eval -cases eval/cases.json -repeat 5 \
+    -gateway http://localhost:8080/v1 -gateway-key <key> \
+    -baseline https://api.openai.com/v1 -baseline-key $OPENAI_API_KEY
+```
+
+| | mean score (0–10) | spread |
+|---|---:|---:|
+| raw to the cloud model | *not yet measured* | |
+| through PhiGate, same model | *not yet measured* | |
+
+#### (b) What quality does a real deployment get?
+
+The same command without the overrides, so the router does what it normally
+does and some cases are answered by the local SLM. This is the number a buyer
+cares about, and it measures the pipeline *and* the routing together.
+
+| | mean score (0–10) | spread | cases routed local |
+|---|---:|---:|---:|
+| raw to the cloud model | *not yet measured* | | |
+| through PhiGate, as deployed | *not yet measured* | | 5 of 8 |
+
+#### Read these with their caveats
+
+Unlike the compression table above, these numbers would **not** come from a
+third-party corpus. `eval/cases.json` holds **8 cases written by this project**,
+chosen to include the payloads PhiGate finds hardest — high placeholder density,
+AST-pruned code, Japanese text. That is a sanity check, not an independent
+benchmark, and it is why the harness takes `-repeat`: a judge model is not
+deterministic, so a single score per case is a sample and a delta smaller than
+the spread is noise rather than a finding.
+
+The judge is the same model family as the answers, which biases it — but the
+same judge scores both arms, so the bias largely cancels in the *delta*, which
+is the figure that matters.
+
+The number that should convince your organisation is the one measured on your
+own ticket history. Extend the file and run it.
 
 ---
 
