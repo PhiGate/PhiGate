@@ -83,11 +83,38 @@ func run() error {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 
-	select {
-	case err := <-errCh:
-		return err
-	case sig := <-stop:
-		log.Printf("received %s; draining for up to %s", sig, cfg.ShutdownGrace)
+	// SIGHUP re-reads the configuration in place. Nothing is torn down: no
+	// listener is closed, no connection is dropped, and a streaming completion
+	// in flight finishes under the configuration it started with.
+	//
+	// A failed reload is a no-op that says so. The new configuration is built
+	// and validated in full before any of it is published, so a malformed edit
+	// leaves the running gateway exactly as it was — which is the only way an
+	// operator can be told to reload during business hours.
+	reload := make(chan os.Signal, 1)
+	signal.Notify(reload, syscall.SIGHUP)
+
+	for serving := true; serving; {
+		select {
+		case err := <-errCh:
+			return err
+		case <-reload:
+			next, err := config.Reload(cfg)
+			if err != nil {
+				log.Printf("reload refused, continuing with the running configuration: %v", err)
+				continue
+			}
+			if err := g.Reload(next); err != nil {
+				log.Printf("reload refused, continuing with the running configuration: %v", err)
+				continue
+			}
+			cfg = next
+			log.Print("configuration reloaded")
+			banner(cfg)
+		case sig := <-stop:
+			log.Printf("received %s; draining for up to %s", sig, cfg.ShutdownGrace)
+			serving = false
+		}
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownGrace)

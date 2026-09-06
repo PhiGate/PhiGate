@@ -23,13 +23,19 @@ import (
 //   - /debug/* exists only when explicitly enabled, because it discloses raw
 //     values.
 func (g *Gateway) Routes() http.Handler {
+	// The route table itself is fixed at startup. Which paths exist — the
+	// metrics path, whether the dashboard and the debug endpoint are mounted —
+	// cannot change under a reload, because a live mux cannot be re-registered
+	// without dropping the requests in flight on it. Reload changes what the
+	// handlers do, not which handlers there are.
+	st := g.now()
 	mux := http.NewServeMux()
 
 	// Unauthenticated: liveness and readiness only.
 	mux.HandleFunc("/healthz", g.handleHealthz)
 	mux.HandleFunc("/readyz", g.handleReadyz)
 
-	auth := newAuthenticator(g.cfg.APIKeys, g.cfg.AllowAnonymous)
+	auth := newAuthenticator(g.now)
 	protect := func(h http.HandlerFunc) http.Handler {
 		return auth.Wrap(g.limiter.Wrap(h))
 	}
@@ -38,9 +44,9 @@ func (g *Gateway) Routes() http.Handler {
 	mux.Handle("/v1/models", protect(g.handleModels))
 	mux.Handle("/v1/phigate/stats", protect(g.handleStats))
 	mux.Handle("/v1/phigate/rules", protect(g.handleRules))
-	mux.Handle(g.cfg.MetricsPath, protect(g.handleMetrics))
+	mux.Handle(st.cfg.MetricsPath, protect(g.handleMetrics))
 
-	if g.cfg.DashboardOn {
+	if st.cfg.DashboardOn {
 		mux.Handle("/dashboard", protect(g.handleDashboard))
 	}
 
@@ -48,7 +54,7 @@ func (g *Gateway) Routes() http.Handler {
 	// plaintext. It shipped enabled and unauthenticated, which made it an
 	// exfiltration endpoint for exactly the data the gateway exists to
 	// protect. It is now opt-in and behind authentication.
-	if g.cfg.DebugEnabled {
+	if st.cfg.DebugEnabled {
 		mux.Handle("/debug/compress", protect(g.handleDebugCompress))
 	}
 
@@ -111,7 +117,7 @@ func (g *Gateway) handleReadyz(w http.ResponseWriter, r *http.Request) {
 		Status:   state,
 		Uptime:   time.Since(g.started).Round(time.Second).String(),
 		Backends: backends,
-		Policy:   g.global.policy.Describe(),
+		Policy:   g.now().global.policy.Describe(),
 		Cache:    g.cache.Stats().Enabled,
 		Audit:    g.audit.Enabled(),
 	})
@@ -149,9 +155,10 @@ type statsResponse struct {
 }
 
 func (g *Gateway) handleStats(w http.ResponseWriter, _ *http.Request) {
+	st := g.now()
 	t := g.ledger.Totals()
-	rules := make([]string, 0, len(g.global.engine.Rules()))
-	for _, r := range g.global.engine.Rules() {
+	rules := make([]string, 0, len(st.global.engine.Rules()))
+	for _, r := range st.global.engine.Rules() {
 		rules = append(rules, r.Name+" ("+string(r.Category)+")")
 	}
 	writeJSON(w, http.StatusOK, statsResponse{
@@ -160,8 +167,8 @@ func (g *Gateway) handleStats(w http.ResponseWriter, _ *http.Request) {
 		SavedPct:  formatPercent(t.SavingsPercent()),
 		Cache:     g.cache.Stats(),
 		Sessions:  g.sessions.Len(),
-		Policy:    g.global.policy.Describe(),
-		Guard:     g.guard.Describe(),
+		Policy:    st.global.policy.Describe(),
+		Guard:     st.guard.Describe(),
 		Redaction: rules,
 		Prices:    g.prices.Prices(),
 		Backends: map[string]string{
@@ -185,20 +192,21 @@ func (g *Gateway) handleRules(w http.ResponseWriter, r *http.Request) {
 		Priority int    `json:"priority"`
 		Desc     string `json:"description,omitempty"`
 	}
+	st := g.now()
 	tenant := tenantOf(r)
-	view := g.viewFor(tenant)
+	view := st.viewFor(tenant)
 
 	rules := view.engine.Rules()
 	views := make([]ruleView, 0, len(rules))
 	for _, rl := range rules {
 		views = append(views, ruleView{rl.Name, string(rl.Category), rl.Priority, rl.Description})
 	}
-	_, overridden := g.tenants[tenant]
+	_, overridden := st.tenants[tenant]
 	writeJSON(w, http.StatusOK, map[string]any{
 		"tenant":            tenant,
 		"tenant_overridden": overridden,
 		"redaction":         views,
-		"egress":            g.guard.Describe(),
+		"egress":            st.guard.Describe(),
 		"policy":            view.policy.Describe(),
 	})
 }
@@ -229,7 +237,8 @@ type debugResult struct {
 // handleDebugCompress exposes the compression layer for inspection. It returns
 // raw values and must never be enabled in production; the response says so.
 func (g *Gateway) handleDebugCompress(w http.ResponseWriter, r *http.Request) {
-	raw, err := io_ReadAllLimited(r, g.cfg.MaxBodyBytes)
+	st := g.now()
+	raw, err := io_ReadAllLimited(r, st.cfg.MaxBodyBytes)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "could not read request body", "invalid_request_error", "")
 		return
@@ -239,7 +248,7 @@ func (g *Gateway) handleDebugCompress(w http.ResponseWriter, r *http.Request) {
 	// The debug view is the caller's own, so an operator inspecting what a
 	// tenant's traffic looks like sees that tenant's rule set rather than the
 	// global one.
-	view := g.viewFor(tenantOf(r))
+	view := st.viewFor(tenantOf(r))
 	sess := compressor.NewSession()
 	compressed, err := view.pipeline.Compress(original, sess)
 	if err != nil {

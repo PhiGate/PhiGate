@@ -5,6 +5,12 @@ metadata:
   labels: {{- include "phigate.labels" . | nindent 4 }}
 spec:
   type: {{ .Values.service.type }}
+  {{- if eq .Values.service.sessionAffinity "ClientIP" }}
+  sessionAffinity: ClientIP
+  sessionAffinityConfig:
+    clientIP:
+      timeoutSeconds: {{ .Values.service.sessionAffinityTimeoutSeconds }}
+  {{- end }}
   ports:
     - port: {{ .Values.service.port }}
       targetPort: http

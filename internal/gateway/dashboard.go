@@ -44,11 +44,12 @@ type dashboardData struct {
 // air-gapped from the public internet — cannot load a CDN, and a dashboard that
 // renders blank in the customer's environment is worse than none.
 func (g *Gateway) handleDashboard(w http.ResponseWriter, _ *http.Request) {
+	st := g.now()
 	t := g.ledger.Totals()
 	cs := g.cache.Stats()
 
-	redact := make([]string, 0, len(g.global.engine.Rules()))
-	for _, r := range g.global.engine.Rules() {
+	redact := make([]string, 0, len(st.global.engine.Rules()))
+	for _, r := range st.global.engine.Rules() {
 		redact = append(redact, r.Name+" — "+string(r.Category))
 	}
 	sort.Strings(redact)
@@ -60,8 +61,8 @@ func (g *Gateway) handleDashboard(w http.ResponseWriter, _ *http.Request) {
 		Cache:        cs,
 		CacheHitPct:  trimFloat(cs.HitRate * 100),
 		Sessions:     g.sessions.Len(),
-		Policy:       g.global.policy.Describe(),
-		GuardRules:   g.guard.Describe(),
+		Policy:       st.global.policy.Describe(),
+		GuardRules:   st.guard.Describe(),
 		RedactRules:  redact,
 		Currency:     t.Currency,
 		Generated:    time.Now().Format(time.RFC1123),
@@ -69,7 +70,7 @@ func (g *Gateway) handleDashboard(w http.ResponseWriter, _ *http.Request) {
 		CloudPct:     sharePct(t.CloudRequests, t.Requests),
 		CachePct:     sharePct(t.CacheHits, t.Requests),
 		AuditEnabled: g.audit.Enabled(),
-		DebugOn:      g.cfg.DebugEnabled,
+		DebugOn:      st.cfg.DebugEnabled,
 		Backends: map[string]string{
 			"local": breakerState(g.local),
 			"cloud": breakerState(g.cloud),

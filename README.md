@@ -286,6 +286,48 @@ X-PhiGate-Compression: 78% saved
 
 ## Configuration
 
+Everything below can also come from a JSON file named by `PHIGATE_CONFIG`.
+Precedence is **defaults → file → environment**: the file is the declared state
+you version-control and an auditor reads, and the environment is where a
+container's secrets live and where you reach during an incident, so an emergency
+`PHIGATE_CLOUD_MAX_SENSITIVITY=low` is never overruled by a checked-in file.
+An unknown key in the file is a startup error — a misspelled key accepted and
+ignored is a control that silently does nothing.
+
+**Per-tenant controls.** The tenant label in `PHIGATE_API_KEYS="key:tenant"` can
+carry its own egress policy, rate limit and rule packs, so one gateway serves a
+finance team and an SRE team under different rules instead of two deployments:
+
+```json
+{
+  "api_keys": { "sre-key": "team-sre", "fin-key": "team-finance" },
+  "policy":   { "cloud_max_sensitivity": "internal" },
+  "tenants": {
+    "team-finance": {
+      "policy": { "cloud_max_sensitivity": "low" },
+      "rate_limit_per_min": 60,
+      "redact_packs": ["core", "jp", "secrets"]
+    }
+  }
+}
+```
+
+A tenant may **narrow** what the operator configured, never widen it: a tenant
+policy above the global ceiling is a startup error, as is a tenant block whose
+label no API key maps to. `GET /v1/phigate/rules` answers for the calling
+tenant, so an auditor sees the rules their own traffic is subject to.
+
+**Reload without restarting.** `kill -HUP` re-reads the file. No listener is
+closed, no connection is dropped, and a streaming completion in flight finishes
+under the configuration it started with. API keys, policy thresholds, rate
+limits, rule packs, guard severities and tenant blocks all take effect on the
+next request; a rule change purges the template cache, because every key in it
+was derived under rules that no longer apply. The address, the metrics path and
+whether the dashboard and debug endpoints exist are read once at startup and
+still need a restart. A reload that fails validation is a **no-op that says so**
+— the whole configuration is built before any of it is published, so a malformed
+edit leaves the running gateway exactly as it was.
+
 Only `PHIGATE_API_KEYS` and `PHIGATE_CLOUD_API_KEY` are required. PhiGate
 **refuses to start** without client credentials unless you set
 `PHIGATE_ALLOW_ANONYMOUS=true`, because an unauthenticated gateway in front of a

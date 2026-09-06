@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -20,7 +21,13 @@ import (
 )
 
 // fakeClient is an llm.Client test double.
+//
+// The bookkeeping is mutex-guarded because the reload tests drive it from
+// several goroutines at once. Sequential tests read the fields directly, which
+// is safe while nothing else is running.
 type fakeClient struct {
+	mu sync.Mutex
+
 	name       string
 	reply      string
 	replyCall  []types.ToolCall // tool calls returned alongside reply
@@ -33,8 +40,10 @@ type fakeClient struct {
 
 func (f *fakeClient) Name() string { return f.name }
 func (f *fakeClient) Chat(_ context.Context, req *types.ChatCompletionRequest) (*types.ChatCompletionResponse, error) {
+	f.mu.Lock()
 	f.calls++
 	f.gotReq = req
+	f.mu.Unlock()
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -48,8 +57,10 @@ func (f *fakeClient) Chat(_ context.Context, req *types.ChatCompletionRequest) (
 }
 
 func (f *fakeClient) ChatStream(_ context.Context, req *types.ChatCompletionRequest, onDelta llm.StreamFunc) error {
+	f.mu.Lock()
 	f.calls++
 	f.gotReq = req
+	f.mu.Unlock()
 	if f.err != nil {
 		return f.err
 	}
@@ -1233,4 +1244,215 @@ func TestTenantRuleSetIsSeparate(t *testing.T) {
 	if strict["policy"] == open["policy"] {
 		t.Error("both tenants reported the same policy")
 	}
+}
+
+// TestReloadSwapsPolicyWithoutRestart is the SIer claim, asserted rather than
+// described: the same running gateway, the same listener, a different egress
+// limit on the next request.
+func TestReloadSwapsPolicyWithoutRestart(t *testing.T) {
+	local := &fakeClient{name: "local", reply: "ok"}
+	cloud := &fakeClient{name: "cloud", reply: "ok"}
+	g := newTestGateway(t, testConfig(), local, cloud)
+
+	// An internal hostname is allowed to the cloud under the default policy.
+	const q = "check web-1.corp"
+	if got := postAsAnon(t, g, q).Header().Get("X-PhiGate-Policy"); got != "allow" {
+		t.Fatalf("before reload: policy = %q, want allow", got)
+	}
+
+	tighter := testConfig()
+	p, err := policy.Parse("low", "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tighter.Policy = p
+	if err := g.Reload(tighter); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+
+	if got := postAsAnon(t, g, q).Header().Get("X-PhiGate-Policy"); got != "local_only" {
+		t.Fatalf("after reload: policy = %q, want local_only", got)
+	}
+}
+
+func postAsAnon(t *testing.T, g *Gateway, content string) *httptest.ResponseRecorder {
+	t.Helper()
+	rec, _ := postChat(t, g, content)
+	return rec
+}
+
+// TestReloadRotatesAPIKeys: rotating a credential is the operation an SIer asks
+// about most, and it used to need a restart.
+func TestReloadRotatesAPIKeys(t *testing.T) {
+	cfg := testConfig()
+	cfg.AllowAnonymous = false
+	cfg.APIKeys = map[string]string{"old-key": "t"}
+	g := newTestGateway(t, cfg, &fakeClient{name: "local", reply: "ok"}, &fakeClient{name: "cloud"})
+
+	if rec := postAs(t, g, "old-key", "hello"); rec.Code != 200 {
+		t.Fatalf("old key before reload: %d", rec.Code)
+	}
+
+	rotated := cfg
+	rotated.APIKeys = map[string]string{"new-key": "t"}
+	if err := g.Reload(rotated); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+
+	if rec := postAs(t, g, "new-key", "hello"); rec.Code != 200 {
+		t.Errorf("new key after reload: %d, want 200", rec.Code)
+	}
+	if rec := postAs(t, g, "old-key", "hello"); rec.Code != 401 {
+		t.Errorf("revoked key after reload: %d, want 401", rec.Code)
+	}
+}
+
+// TestFailedReloadChangesNothing is the property that makes reloading safe to
+// do during business hours. A rule pack that does not exist must leave the
+// running configuration untouched, not half-applied.
+func TestFailedReloadChangesNothing(t *testing.T) {
+	cfg := testConfig()
+	g := newTestGateway(t, cfg, &fakeClient{name: "local", reply: "ok"}, &fakeClient{name: "cloud"})
+
+	before := len(g.now().global.engine.Rules())
+
+	broken := testConfig()
+	broken.RedactPacks = []string{"no-such-pack"}
+	p, err := policy.Parse("low", "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	broken.Policy = p // a change that would be visible if it were applied
+
+	if err := g.Reload(broken); err == nil {
+		t.Fatal("a reload naming a rule pack that does not exist was accepted")
+	}
+	if got := len(g.now().global.engine.Rules()); got != before {
+		t.Errorf("rule count changed from %d to %d after a failed reload", before, got)
+	}
+	if got := postAsAnon(t, g, "check web-1.corp").Header().Get("X-PhiGate-Policy"); got != "allow" {
+		t.Fatalf("policy = %q after a failed reload; the new value was partially applied", got)
+	}
+}
+
+// TestReloadPurgesTheCacheWhenRulesChange: a rule change alters what
+// "compressed" means, so every key was derived under rules that no longer
+// apply. Serving those entries afterwards answers the new question with the old
+// question's answer.
+func TestReloadPurgesTheCacheWhenRulesChange(t *testing.T) {
+	cfg := testConfig()
+	cfg.CacheMax = 100
+	cfg.CacheEnabled = true
+	local := &fakeClient{name: "local", reply: "ok"}
+	g := newTestGateway(t, cfg, local, &fakeClient{name: "cloud"})
+
+	const q = "disk full on 10.0.0.5"
+	postAsAnon(t, g, q)
+	if rec := postAsAnon(t, g, q); rec.Header().Get("X-PhiGate-Cache") != "hit" {
+		t.Fatal("the second identical request did not hit the cache")
+	}
+
+	changed := cfg
+	changed.RedactPacks = []string{"core"}
+	if err := g.Reload(changed); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if rec := postAsAnon(t, g, q); rec.Header().Get("X-PhiGate-Cache") == "hit" {
+		t.Error("an entry keyed under the old rule set survived a rule change")
+	}
+
+	// A reload that does not touch detection must keep the cache: purging on
+	// every reload would make reloading expensive enough to avoid.
+	postAsAnon(t, g, q)
+	untouched := changed
+	untouched.RateLimitPerMin = 0
+	if err := g.Reload(untouched); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if rec := postAsAnon(t, g, q); rec.Header().Get("X-PhiGate-Cache") != "hit" {
+		t.Error("the cache was purged by a reload that did not change detection")
+	}
+}
+
+// TestReloadDoesNotDisturbSessions: hydration depends on the session
+// dictionary, so a reload that dropped sessions would break every conversation
+// in progress at the moment an operator rotated a key.
+func TestReloadDoesNotDisturbSessions(t *testing.T) {
+	local := &fakeClient{name: "local", reply: "host <V1> again"}
+	g := newTestGateway(t, testConfig(), local, &fakeClient{name: "cloud"})
+
+	post := func(content string) types.ChatCompletionResponse {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("POST", "/v1/chat/completions",
+			strings.NewReader(`{"model":"gpt-4o","messages":[{"role":"user","content":`+quote(content)+`}]}`))
+		req.Header.Set("X-PhiGate-Session", "conv-1")
+		g.Routes().ServeHTTP(rec, req)
+		var resp types.ChatCompletionResponse
+		_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+		return resp
+	}
+
+	post("disk full on 10.0.0.5")
+	if err := g.Reload(testConfig()); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	// The dictionary from before the reload must still resolve <V1>.
+	if got := post("and now?").Choices[0].Message.Content; !strings.Contains(got, "10.0.0.5") {
+		t.Errorf("content = %q; the session dictionary did not survive the reload", got)
+	}
+}
+
+// TestReloadUnderLoadIsRaceFree exercises the swap against live traffic, which
+// is the condition it exists for and the one a data race would only ever show
+// up under. Meaningful only with -race; harmless without it.
+func TestReloadUnderLoadIsRaceFree(t *testing.T) {
+	cfg := testConfig()
+	cfg.CacheMax = 50
+	cfg.CacheEnabled = true
+	g := newTestGateway(t, cfg, &fakeClient{name: "local", reply: "ok <V1>"}, &fakeClient{name: "cloud"})
+
+	strict := testConfig()
+	p, err := policy.Parse("low", "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	strict.Policy = p
+	strict.RedactPacks = []string{"core"}
+
+	var wg sync.WaitGroup
+	done := make(chan struct{})
+
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-done:
+					return
+				default:
+				}
+				rec, _ := postChat(t, g, "disk full on 10.0.0.5 and web-1.corp")
+				if rec.Code != 200 {
+					t.Errorf("request failed during reload: %d", rec.Code)
+					return
+				}
+			}
+		}()
+	}
+
+	// Flip between two configurations while those requests are in flight.
+	for i := range 40 {
+		next := cfg
+		if i%2 == 1 {
+			next = strict
+		}
+		if err := g.Reload(next); err != nil {
+			t.Errorf("reload %d: %v", i, err)
+			break
+		}
+	}
+	close(done)
+	wg.Wait()
 }

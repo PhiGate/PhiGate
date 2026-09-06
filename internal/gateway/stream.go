@@ -144,7 +144,7 @@ func (g *Gateway) emitToolCalls(p *requestPlan, sw *sseWriter, scanner *sandbox.
 	// Enumeration is counted over the calls as one body, the same union rule
 	// the blocking path uses.
 	_, report := p.sess.Dict.HydrateReport(strings.Join(maskedArgs, "\n"))
-	if g.cfg.Enumeration.Exceeded(report.Distinct, p.sess.Dict.Len()) {
+	if p.state.cfg.Enumeration.Exceeded(report.Distinct, p.sess.Dict.Len()) {
 		p.event.EnumerationStop = true
 		p.event.EgressBlocked = true
 		g.metrics.blocked.Inc("dictionary_enumeration", "block")
@@ -165,7 +165,7 @@ func (g *Gateway) emitToolCalls(p *requestPlan, sw *sseWriter, scanner *sandbox.
 		hydratedArgs = append(hydratedArgs, fn.Arguments)
 	}
 
-	if v := g.guard.Inspect(strings.Join(argumentStrings(hydratedArgs), "\n")); v.Blocked {
+	if v := p.state.guard.Inspect(strings.Join(argumentStrings(hydratedArgs), "\n")); v.Blocked {
 		g.metrics.blocked.Inc(v.Rule, v.Severity.String())
 		p.event.EgressBlocked = true
 		p.event.EgressRule = v.Rule
@@ -188,13 +188,13 @@ func (g *Gateway) emitToolCalls(p *requestPlan, sw *sseWriter, scanner *sandbox.
 func (g *Gateway) newScanner(p *requestPlan, sw *sseWriter) *sandbox.StreamScanner {
 	hydrate := func(line string) string {
 		out, report := p.sess.Dict.HydrateReport(line)
-		if g.cfg.Enumeration.Exceeded(report.Distinct, p.sess.Dict.Len()) {
+		if p.state.cfg.Enumeration.Exceeded(report.Distinct, p.sess.Dict.Len()) {
 			p.event.EnumerationStop = true
 			return "" // withhold the line; the guard below seals the stream
 		}
 		return out
 	}
-	return sandbox.NewStreamScannerWith(g.guard, hydrate,
+	return sandbox.NewStreamScannerWith(p.state.guard, hydrate,
 		func(safe string) error { return sw.emit(safe, "") },
 		func(v sandbox.Verdict) error {
 			g.metrics.blocked.Inc(v.Rule, v.Severity.String())
@@ -206,7 +206,7 @@ func (g *Gateway) newScanner(p *requestPlan, sw *sseWriter) *sandbox.StreamScann
 			sw.header("X-PhiGate-Blocked", v.Rule)
 			return sw.emit("\n"+blockedNotice(v)+"\n", "content_filter")
 		},
-		sandbox.Options{Mode: g.cfg.StreamMode, MaxBuffer: g.cfg.StreamMaxBuffer})
+		sandbox.Options{Mode: p.state.cfg.StreamMode, MaxBuffer: p.state.cfg.StreamMaxBuffer})
 }
 
 // streamCached replays a cached answer as SSE, hydrated for this session.

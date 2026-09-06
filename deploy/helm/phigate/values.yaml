@@ -7,6 +7,24 @@
 
 replicaCount: 2
 
+# Read this before raising replicaCount or enabling autoscaling.
+#
+# Three things PhiGate keeps are per-process and are not shared between
+# replicas, because the privacy design says they must not be:
+#
+#   - The session dictionary, which maps <V1> back to the real value. It is
+#     deliberately memory-only and has no Redis backend: the guarantee is that
+#     raw values are never persisted, and a shared session store would persist
+#     them. A multi-turn conversation therefore has to reach the same replica,
+#     which is what service.sessionAffinity below is for.
+#   - The template cache. It holds no customer data, but it is per-process, so
+#     N replicas mean roughly 1/N of the hit rate until each has warmed up.
+#   - The savings ledger, which is per-process and resets on restart. The
+#     dashboard's figures are one replica's, not the deployment's.
+#
+# Clients that do not send X-PhiGate-Session are unaffected by the first point;
+# every request is self-contained and any replica can serve it.
+
 image:
   repository: ghcr.io/phigate/phigate
   tag: ""            # defaults to .Chart.AppVersion
@@ -19,6 +37,12 @@ fullnameOverride: ""
 service:
   type: ClusterIP
   port: 8080
+  # Set to ClientIP to pin a client to one replica, which is what multi-turn
+  # sessions need when replicaCount is above 1. It is off by default because it
+  # is the wrong trade for a purely single-shot workload: affinity unbalances
+  # the pods, and a client behind one NAT address becomes one client.
+  sessionAffinity: None
+  sessionAffinityTimeoutSeconds: 10800
 
 ingress:
   enabled: false

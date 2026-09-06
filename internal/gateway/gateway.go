@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/phigate/phigate/internal/audit"
@@ -18,8 +19,17 @@ import (
 	"github.com/phigate/phigate/internal/tokens"
 )
 
-// Gateway holds the long-lived components shared across requests.
-type Gateway struct {
+// runtimeState is the part of a Gateway that a reload replaces.
+//
+// It is swapped as one immutable value behind an atomic pointer rather than
+// mutated field by field. A request that begins under one configuration must
+// finish under it: a payload classified by one tenant's rule set and then
+// judged by another's policy has been through a control that never existed,
+// and an operator asked to reason about which half applied has no answer.
+//
+// Nothing here is written after it is published. Reload builds a whole new
+// value, and readers hold the pointer they loaded for the life of the request.
+type runtimeState struct {
 	cfg config.Config
 
 	// global is what applies to a tenant with no overrides, and what the
@@ -28,13 +38,22 @@ type Gateway struct {
 	global  tenantView
 	tenants map[string]tenantView
 
+	guard *sandbox.RuleGuard
+}
+
+// Gateway holds the long-lived components shared across requests.
+type Gateway struct {
+	// state is the reloadable configuration. Read it once per request with
+	// now(); reading it twice can straddle a reload.
+	state atomic.Pointer[runtimeState]
+
 	// limiter holds live token buckets, so it belongs to the gateway rather
 	// than to the route table: Routes may be called more than once, and a
-	// limiter rebuilt per call would hand every caller a full bucket.
+	// limiter rebuilt per call would hand every caller a full bucket. It reads
+	// its limits through now(), so a reload retunes the buckets it already has.
 	limiter *rateLimiter
 
 	router   router.Router
-	guard    *sandbox.RuleGuard
 	ingress  *sandbox.IngressGuard
 	sessions *session.Store
 	cache    cache.Store
@@ -71,13 +90,111 @@ type tenantView struct {
 	policy   policy.Policy
 }
 
+// now returns the configuration currently in force. Call it once per request
+// and pass the result down; calling it twice can straddle a reload.
+func (g *Gateway) now() *runtimeState { return g.state.Load() }
+
 // viewFor returns the controls in force for a tenant, falling back to the
 // global ones for a tenant with no overrides.
-func (g *Gateway) viewFor(tenant string) tenantView {
-	if v, ok := g.tenants[tenant]; ok {
+func (s *runtimeState) viewFor(tenant string) tenantView {
+	if v, ok := s.tenants[tenant]; ok {
 		return v
 	}
-	return g.global
+	return s.global
+}
+
+// Reload replaces the gateway's configuration without interrupting a single
+// connection.
+//
+// # What it does not touch
+//
+// The listener, the upstream clients, the session store and the cache all
+// survive. That is the point: an SIer's availability review asks whether
+// changing an API key or a routing rule drops in-flight requests, and the
+// answer has to be no. Settings that would require a new listener or a new
+// route table — the address, the metrics path, whether the dashboard and the
+// debug endpoint exist — are read once at startup and are not reloadable; a
+// change to those still needs a restart, and saying so is better than
+// pretending otherwise.
+//
+// # Why it is all-or-nothing
+//
+// cfg has already been validated by config.Reload, and the whole new state is
+// built here before any of it is published. A rule pack that fails to compile
+// aborts the reload with the old configuration still serving, rather than
+// leaving the gateway with new keys and an old policy.
+func (g *Gateway) Reload(cfg config.Config) error {
+	engine, err := BuildRedactEngine(cfg)
+	if err != nil {
+		return fmt.Errorf("reload: %w", err)
+	}
+	views, err := buildTenantViews(cfg, engine)
+	if err != nil {
+		return fmt.Errorf("reload: %w", err)
+	}
+	guard := sandbox.NewGuard()
+	if len(cfg.GuardOverrides) > 0 {
+		guard = guard.WithOverrides(cfg.GuardOverrides)
+	}
+
+	old := g.now()
+	g.state.Store(&runtimeState{
+		cfg:     cfg,
+		global:  newTenantView(engine, cfg.Policy),
+		tenants: views,
+		guard:   guard,
+	})
+
+	// A rule change alters what "compressed" means, so every key in the cache
+	// was derived under rules that no longer apply. cache.Store documents
+	// Purge as existing for exactly this.
+	if rulesChanged(old.cfg, cfg) {
+		g.cache.Purge()
+	}
+	return nil
+}
+
+// rulesChanged reports whether the detection configuration differs, which is
+// what invalidates the template cache. Comparing the settings rather than the
+// compiled engines keeps this honest about what it can actually detect: two
+// engines built from the same options are equivalent, and nothing else is
+// claimed.
+func rulesChanged(a, b config.Config) bool {
+	if a.DisableEntropy != b.DisableEntropy || a.RedactRuleDir != b.RedactRuleDir {
+		return true
+	}
+	if !sameStrings(a.RedactPacks, b.RedactPacks) ||
+		!sameStrings(a.DisableRules, b.DisableRules) ||
+		!sameStrings(a.InternalDomains, b.InternalDomains) {
+		return true
+	}
+	// A tenant's rule set changing invalidates entries it contributed, and the
+	// cache is shared, so the whole thing goes.
+	if len(a.Tenants) != len(b.Tenants) {
+		return true
+	}
+	for name, ta := range a.Tenants {
+		tb, ok := b.Tenants[name]
+		if !ok ||
+			!sameStrings(ta.RedactPacks, tb.RedactPacks) ||
+			!sameStrings(ta.DisableRules, tb.DisableRules) ||
+			!sameStrings(ta.InternalDomains, tb.InternalDomains) {
+			return true
+		}
+	}
+	return false
+}
+
+func sameStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // gatewayMetrics holds the registered metric handles.
@@ -133,11 +250,13 @@ func NewWith(
 		guard = guard.WithOverrides(cfg.GuardOverrides)
 	}
 
+	views, err := buildTenantViews(cfg, engine)
+	if err != nil {
+		return nil, err
+	}
+
 	g := &Gateway{
-		cfg:        cfg,
-		global:     newTenantView(engine, cfg.Policy),
 		router:     rtr,
-		guard:      guard,
 		ingress:    sandbox.NewIngressGuard(),
 		sessions:   session.NewStore(cfg.SessionTTL, cfg.SessionMax),
 		cache:      cache.New(cfg.CacheTTL, cfg.CacheMax),
@@ -152,14 +271,13 @@ func NewWith(
 		preamble:   cfg.SystemPreamble,
 		started:    time.Now(),
 	}
-
-	g.limiter = newRateLimiter(&g.cfg)
-
-	views, err := buildTenantViews(cfg, engine)
-	if err != nil {
-		return nil, err
-	}
-	g.tenants = views
+	g.state.Store(&runtimeState{
+		cfg:     cfg,
+		global:  newTenantView(engine, cfg.Policy),
+		tenants: views,
+		guard:   guard,
+	})
+	g.limiter = newRateLimiter(g.now)
 
 	g.metrics = g.registerMetrics()
 	return g, nil

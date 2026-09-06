@@ -26,6 +26,10 @@ import (
 // drifting apart. The previous version duplicated routing and fallback logic
 // across the two, and the copies had already diverged.
 type requestPlan struct {
+	// state is the configuration this request runs under, loaded once so a
+	// reload halfway through cannot have it classified by one rule set and
+	// judged by another's policy.
+	state  *runtimeState
 	sess   *compressor.Session
 	tenant string
 	// view is the tenant's controls: its detector, its pipelines, its policy.
@@ -56,7 +60,9 @@ func (g *Gateway) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	body, err := io.ReadAll(io.LimitReader(r.Body, g.cfg.MaxBodyBytes))
+	st := g.now()
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, st.cfg.MaxBodyBytes))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "could not read request body", "invalid_request_error", "")
 		return
@@ -71,7 +77,7 @@ func (g *Gateway) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	plan, err := g.plan(r, &req)
+	plan, err := g.plan(st, r, &req)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "compression error", "api_error", "")
 		return
@@ -96,20 +102,20 @@ func (g *Gateway) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 }
 
 // plan compresses, classifies and routes the request.
-func (g *Gateway) plan(r *http.Request, req *types.ChatCompletionRequest) (*requestPlan, error) {
-	p := &requestPlan{start: time.Now()}
+func (g *Gateway) plan(st *runtimeState, r *http.Request, req *types.ChatCompletionRequest) (*requestPlan, error) {
+	p := &requestPlan{state: st, start: time.Now()}
 
 	// Every control below is the caller's tenant's, resolved once so the rest
 	// of the request cannot accidentally mix one tenant's detector with
 	// another's policy.
 	p.tenant = tenantOf(r)
-	p.view = g.viewFor(p.tenant)
+	p.view = st.viewFor(p.tenant)
 
 	// Session continuity: one conversation reuses one dictionary, so a given
 	// IP is <V1> in every turn rather than a different token each time.
-	p.sess = g.sessions.Get(strings.TrimSpace(r.Header.Get(g.cfg.SessionHeader)))
+	p.sess = g.sessions.Get(strings.TrimSpace(r.Header.Get(st.cfg.SessionHeader)))
 
-	if g.cfg.IngressScan {
+	if st.cfg.IngressScan {
 		var joined strings.Builder
 		for _, m := range req.Messages {
 			// Tool-call arguments are replayed model output, which is exactly
@@ -196,7 +202,7 @@ func (g *Gateway) plan(r *http.Request, req *types.ChatCompletionRequest) (*requ
 		RequestID:       requestIDOf(r),
 		SessionID:       p.sess.ID,
 		Tenant:          p.tenant,
-		ClientIP:        clientIP(r, g.cfg.TrustedProxyHeader),
+		ClientIP:        clientIP(r, st.cfg.TrustedProxyHeader),
 		Model:           req.Model,
 		PromptHash:      audit.Hash(strings.Join(compressedTexts, "\n")),
 		Classifications: classCounts,
@@ -425,7 +431,7 @@ func (g *Gateway) finalize(w http.ResponseWriter, p *requestPlan, resp *types.Ch
 		// Dictionary enumeration: an answer that resolves most of a large
 		// dictionary is reciting it rather than using it. Serving that would
 		// turn hydration itself into the exfiltration channel.
-		if g.cfg.Enumeration.Exceeded(report.Distinct, p.sess.Dict.Len()) {
+		if p.state.cfg.Enumeration.Exceeded(report.Distinct, p.sess.Dict.Len()) {
 			p.event.EnumerationStop = true
 			p.event.EgressBlocked = true
 			msg.Content = enumerationNotice()
@@ -449,7 +455,7 @@ func (g *Gateway) finalize(w http.ResponseWriter, p *requestPlan, resp *types.Ch
 		// inspecting Content alone would wave through the one case the egress
 		// guard exists for.
 		inspect := append([]string{hydrated}, argumentStrings(hydratedArgs)...)
-		v := g.guard.Inspect(strings.Join(inspect, "\n"))
+		v := p.state.guard.Inspect(strings.Join(inspect, "\n"))
 		for _, f := range v.Findings {
 			p.event.EgressFindings = append(p.event.EgressFindings, f.Rule+"="+f.Severity)
 		}

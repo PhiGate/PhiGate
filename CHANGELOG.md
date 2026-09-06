@@ -12,6 +12,46 @@ read.
 
 ## [Unreleased]
 
+### Added
+
+- **A JSON configuration file**, named by `PHIGATE_CONFIG`. Precedence is
+  defaults, then file, then environment: the file is the declared state you
+  version-control, and the environment is where secrets live and where an
+  operator reaches during an incident, so an emergency
+  `PHIGATE_CLOUD_MAX_SENSITIVITY=low` is not overruled by a checked-in file. An
+  unknown key is a startup error. JSON rather than YAML because CE's single
+  third-party dependency is a property a security review checks, and rule packs
+  and the price book are already JSON.
+
+- **Per-tenant controls.** A tenant label can now carry its own egress policy,
+  rate limits and rule packs, so one gateway serves two teams under different
+  rules instead of two deployments. A tenant may narrow what the operator
+  configured, never widen it: a tenant policy above the global ceiling is a
+  startup error, as is a tenant block whose label no API key maps to.
+  `GET /v1/phigate/rules` now answers for the calling tenant.
+
+- **Reload on SIGHUP.** No listener is closed, no connection is dropped, and a
+  streaming completion in flight finishes under the configuration it started
+  with. API keys, policy thresholds, rate limits, rule packs, guard severities
+  and tenant blocks take effect on the next request; a rule change purges the
+  template cache, since every key in it was derived under rules that no longer
+  apply. The address, metrics path, dashboard and debug endpoint are read once
+  at startup and still need a restart. A reload that fails validation is a
+  no-op: the whole configuration is built before any of it is published.
+
+### Fixed
+
+- **The rate limiter was built inside `Routes()`**, which holds live token
+  buckets, so calling `Routes()` more than once handed every caller a full
+  bucket.
+
+- **The Helm chart defaulted to two replicas with no session affinity**, while
+  the session dictionary is deliberately per-process — it is memory-only
+  because the guarantee is that raw values are never persisted. Multi-turn
+  conversations could land on a replica that had never seen their dictionary.
+  `service.sessionAffinity` is now available and values.yaml documents which
+  state is per-process and why.
+
 ### Changed — what may leave the network
 
 - **Tool-call arguments are now masked.** An assistant turn that invokes a tool

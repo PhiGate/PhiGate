@@ -61,23 +61,26 @@ func withRequestID(next http.Handler) http.Handler {
 // requests using the enterprise's cloud API key — an open relay in front of a
 // billed account — and could reach the debug endpoint that printed the
 // plaintext of everything the gateway had just masked.
+// It reads its credentials through now() rather than capturing them, so a key
+// rotated by a reload takes effect on the next request instead of the next
+// restart — which is the whole point of being able to rotate one.
 type authenticator struct {
-	keys      map[string]string // key -> tenant
-	anonymous bool
+	now func() *runtimeState
 }
 
-func newAuthenticator(keys map[string]string, anonymous bool) *authenticator {
-	return &authenticator{keys: keys, anonymous: anonymous}
+func newAuthenticator(now func() *runtimeState) *authenticator {
+	return &authenticator{now: now}
 }
 
 // Wrap enforces authentication on a handler.
 func (a *authenticator) Wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if len(a.keys) == 0 && a.anonymous {
+		cfg := a.now().cfg
+		if len(cfg.APIKeys) == 0 && cfg.AllowAnonymous {
 			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxTenant, "anonymous")))
 			return
 		}
-		tenant, ok := a.authenticate(r)
+		tenant, ok := a.authenticate(r, cfg.APIKeys)
 		if !ok {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="phigate"`)
 			writeError(w, http.StatusUnauthorized,
@@ -89,7 +92,7 @@ func (a *authenticator) Wrap(next http.Handler) http.Handler {
 }
 
 // authenticate accepts the credential in the places OpenAI clients put it.
-func (a *authenticator) authenticate(r *http.Request) (string, bool) {
+func (a *authenticator) authenticate(r *http.Request, keys map[string]string) (string, bool) {
 	candidates := []string{
 		strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "),
 		r.Header.Get("api-key"), // Azure-style clients
@@ -102,7 +105,7 @@ func (a *authenticator) authenticate(r *http.Request) (string, bool) {
 		}
 		// Constant-time compare against each configured key so a timing
 		// side-channel cannot be used to recover one.
-		for key, tenant := range a.keys {
+		for key, tenant := range keys {
 			if subtle.ConstantTimeCompare([]byte(c), []byte(key)) == 1 {
 				return tenant, true
 			}
@@ -136,24 +139,37 @@ type bucket struct {
 	burst  int
 }
 
-// newRateLimiter returns a limiter over cfg, or nil when no tenant is limited.
+// newRateLimiter returns a limiter reading its allowances through now, or nil
+// when no tenant is limited at startup.
 //
 // A nil limiter allows everything, so the common unlimited deployment pays for
-// no bookkeeping at all.
-func newRateLimiter(cfg *config.Config) *rateLimiter {
-	limited := cfg.RateLimitPerMin > 0
-	for _, t := range cfg.Tenants {
-		if t.RateLimitPerMin > 0 {
-			limited = true
-		}
-	}
-	if !limited {
+// no bookkeeping at all. The consequence is that a deployment which starts with
+// no limits anywhere cannot gain one by reload alone; introducing the first
+// limit needs a restart, which validate has no way to warn about and the
+// configuration reference says plainly.
+func newRateLimiter(now func() *runtimeState) *rateLimiter {
+	if !anyLimit(now().cfg) {
 		return nil
 	}
 	return &rateLimiter{
-		limits:  cfg.RateLimitFor,
+		limits: func(tenant string) (int, int) {
+			return now().cfg.RateLimitFor(tenant)
+		},
 		buckets: map[string]*bucket{},
 	}
+}
+
+// anyLimit reports whether any tenant is limited at all.
+func anyLimit(cfg config.Config) bool {
+	if cfg.RateLimitPerMin > 0 {
+		return true
+	}
+	for _, t := range cfg.Tenants {
+		if t.RateLimitPerMin > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // Allow reports whether the tenant may make another request now.
