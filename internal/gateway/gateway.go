@@ -228,8 +228,8 @@ func New(cfg config.Config) (*Gateway, error) {
 		prices.SetLocalCost(cfg.LocalCostPerM)
 	}
 
-	local := llm.NewClient(backendConfig("local", cfg.Local, cfg))
-	cloud := llm.NewClient(backendConfig("cloud", cfg.Cloud, cfg))
+	local := llm.NewClient(BackendConfig("local", cfg.Local, cfg))
+	cloud := llm.NewClient(BackendConfig("cloud", cfg.Cloud, cfg))
 
 	return NewWith(cfg, engine, prices, local, cloud, router.NewHeuristicRouter())
 }
@@ -406,8 +406,12 @@ func BuildRedactEngine(cfg config.Config) (*redact.Engine, error) {
 	return redact.NewEngine(opts)
 }
 
-// backendConfig converts config.Backend into an llm.ProviderConfig.
-func backendConfig(name string, b config.Backend, cfg config.Config) llm.ProviderConfig {
+// BackendConfig converts config.Backend into an llm.ProviderConfig.
+//
+// Exported because the enterprise edition builds its gateway through NewWith —
+// the detector cannot be substituted after construction — and so has to
+// assemble the same clients New would have.
+func BackendConfig(name string, b config.Backend, cfg config.Config) llm.ProviderConfig {
 	return llm.ProviderConfig{
 		Name:             name,
 		Provider:         b.Provider,

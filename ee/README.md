@@ -45,12 +45,34 @@ EE contains no request-path logic. The pipeline, redaction engine, egress
 policy and sandbox all live in CE; EE only substitutes implementations of the
 seams CE declares:
 
-| Seam | CE implementation | EE substitutes |
-|---|---|---|
-| `cache.Store` | bounded in-memory LRU | embedded HNSW semantic tier, distributed tier |
-| `tokens.LedgerStore` | in-memory totals | durable and cross-node quota accounting |
-| `redact.Detector` | regex rule packs | dictionary/SLM-backed precision detection |
-| `audit.Sink` | JSON lines to a file | append-only storage, retention proofs, SIEM |
+| Seam | CE implementation | EE substitutes | Wired through |
+|---|---|---|---|
+| `cache.Store` | bounded in-memory LRU | embedded HNSW semantic tier, distributed tier | `SetCache`, plus the optional `cache.ProbeStore` |
+| `tokens.LedgerStore` | in-memory totals | durable and cross-node quota accounting | `SetLedger`, plus the optional `tokens.TenantLedger` |
+| `redact.Detector` | regex rule packs | dictionary/SLM-backed precision detection | `NewWith` — see below |
+| `audit.Sink` | JSON lines to a file | append-only storage, retention proofs, SIEM | `SetAudit` |
+
+Two of those seams needed more from CE than an interface, and CE now provides
+it. A hash is one-way, so a semantic tier cannot work from a cache key alone:
+`cache.Probe` carries the compressed text beside the key, and a store that
+implements `ProbeStore` is handed the whole probe. And a quota is per-tenant or
+it is not a quota, so `tokens.Record` carries the tenant label and
+`tokens.TenantLedger` is the optional half a durable store implements. CE
+implements neither optional interface — deliberately, and with a test asserting
+it, because CE's exact-match cache holds no prompt text at all and its ledger's
+totals are process-wide. Claiming otherwise would make a budget check silently
+answer for the whole deployment.
+
+The detector is the seam that cannot be substituted after construction: the
+compression pipeline captures it, and swapping a `Masker` while requests are in
+flight is a data race. EE therefore builds its gateway through `NewWith` rather
+than `New`, and CE exports `BuildRedactEngine` and `BackendConfig` so it can
+assemble the same engine and clients `New` would have.
+
+Whatever detector EE installs **wraps** the community engine rather than
+replacing it. A detector that could find less than CE's would quietly weaken
+the leak guarantee CE's own corpus is written against, so composition is the
+rule and the EE detector's tests assert the superset property directly.
 
 Keeping the fork at the seams rather than in the handler is what stops the two
 editions drifting. A bug fixed in CE is fixed in EE, and a leak test that passes

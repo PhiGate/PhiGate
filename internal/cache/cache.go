@@ -61,6 +61,41 @@ type Store interface {
 	Stats() Stats
 }
 
+// Probe is a cache lookup with the material a hash throws away.
+//
+// Key alone is enough for this package's exact-match store and is all it uses.
+// A tier that matches on meaning rather than on bytes needs the compressed
+// text, and Key is a SHA-256 digest of it — the one operation that cannot be
+// undone. Probe carries both so such a tier is possible without the request
+// path learning which kind of store it is talking to.
+//
+// Texts is the *compressed* text: masked, with <V1> and #REF1 in place of every
+// value. Nothing here has ever held a raw value, and nothing that consumes a
+// Probe may store one.
+type Probe struct {
+	Key         string
+	Model       string
+	Texts       []string
+	Temperature *float64
+	MaxTokens   *int
+}
+
+// ProbeStore is the optional half of the seam, implemented by a store that can
+// use more than the key.
+//
+// It is separate from Store so the community edition keeps the property its
+// package doc claims: the cache holds no prompt text at all, not even masked
+// text, which keeps a memory dump of the gateway free of customer payloads.
+// A tier that indexes meaning necessarily gives that up — an embedding is a
+// lossy but not one-way representation of the text it was built from — and that
+// is a trade to be made deliberately, in the tier's own documentation and
+// threat model, not inherited by every implementation of Store.
+type ProbeStore interface {
+	Store
+	// GetProbe returns a cached entry for the probe, exact matches first.
+	GetProbe(p Probe) (Entry, bool)
+}
+
 // Entry is a cached, still-masked answer.
 type Entry struct {
 	// Content is the answer as the model produced it, with placeholders intact.

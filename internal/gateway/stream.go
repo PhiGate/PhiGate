@@ -32,7 +32,7 @@ func (g *Gateway) streamResponse(w http.ResponseWriter, r *http.Request, p *requ
 
 	// A cached answer is replayed as a stream so the client sees no difference
 	// between a hit and a miss.
-	if e, ok := g.cache.Get(p.cacheKey); ok {
+	if e, ok := g.cacheGet(p); ok {
 		g.metrics.cacheOps.Inc("hit")
 		p.event.CacheHit = true
 		g.streamCached(w, flusher, p, req, e)
@@ -106,6 +106,7 @@ func (g *Gateway) streamResponse(w http.ResponseWriter, r *http.Request, p *requ
 	}
 
 	g.finish(p, tokens.Record{
+		Tenant:           p.tenant,
 		Route:            routeOf(p.routed.Target),
 		Model:            model,
 		BaselineTokens:   p.baseline,
@@ -223,6 +224,7 @@ func (g *Gateway) streamCached(w http.ResponseWriter, flusher http.Flusher, p *r
 	sw.done()
 
 	g.finish(p, tokens.Record{
+		Tenant:           p.tenant,
 		Route:            tokens.RouteCache,
 		Model:            e.Model,
 		BaselineTokens:   p.baseline,

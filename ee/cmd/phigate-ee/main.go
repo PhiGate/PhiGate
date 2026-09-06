@@ -30,6 +30,10 @@ import (
 
 	"github.com/phigate/phigate/internal/config"
 	"github.com/phigate/phigate/internal/gateway"
+	"github.com/phigate/phigate/internal/llm"
+	"github.com/phigate/phigate/internal/redact"
+	"github.com/phigate/phigate/internal/router"
+	"github.com/phigate/phigate/internal/tokens"
 )
 
 func main() {
@@ -38,17 +42,44 @@ func main() {
 		log.Fatalf("phigate-ee: %v", err)
 	}
 
-	g, err := gateway.New(cfg)
+	// The detector is the one seam that cannot be substituted after
+	// construction: the compression pipeline captures it, and swapping a Masker
+	// while requests are in flight is a data race. So EE builds the gateway
+	// through NewWith rather than New.
+	//
+	// Whatever goes here wraps the community engine, never replaces it. A
+	// detector that could find *less* than CE's would quietly weaken the leak
+	// guarantee that CE's own corpus is written against, so composition is the
+	// rule and the EE detector's tests assert the superset property directly.
+	detector, err := enterpriseDetector(cfg)
+	if err != nil {
+		log.Fatalf("phigate-ee: %v", err)
+	}
+
+	prices := tokens.NewPriceBook()
+	if cfg.PriceBookPath != "" {
+		if err := prices.LoadFile(cfg.PriceBookPath); err != nil {
+			log.Fatalf("phigate-ee: %v", err)
+		}
+	}
+	if cfg.LocalCostPerM > 0 {
+		prices.SetLocalCost(cfg.LocalCostPerM)
+	}
+
+	g, err := gateway.NewWith(cfg, detector, prices,
+		llm.NewClient(gateway.BackendConfig("local", cfg.Local, cfg)),
+		llm.NewClient(gateway.BackendConfig("cloud", cfg.Cloud, cfg)),
+		router.NewHeuristicRouter())
 	if err != nil {
 		log.Fatalf("phigate-ee: %v", err)
 	}
 	defer g.Close()
 
-	// EE substitutions are registered here as each phase lands:
+	// The remaining substitutions are registered here as each phase lands:
 	//
 	//	g.SetAudit(worm.New(...))       // append-only, retention proofs
-	//	g.SetCache(semantic.New(...))   // embedded HNSW tier
-	//	g.SetLedger(durable.New(...))   // survives a rolling update
+	//	g.SetCache(semantic.New(...))   // embedded HNSW tier, via cache.ProbeStore
+	//	g.SetLedger(durable.New(...))   // survives a rolling update, per tenant
 	//
 	// Until then this binary would be CE under an EE name, and shipping that
 	// would be a lie told to whoever runs it. It refuses to serve instead.
@@ -56,4 +87,14 @@ func main() {
 	log.Fatalf("phigate-ee: no enterprise implementations are registered yet; "+
 		"run the community edition instead (cmd/phigate). "+
 		"Seams resolved and server buildable on %s.", srv.Addr)
+}
+
+// enterpriseDetector returns the detector EE runs with.
+//
+// It is the community engine until an enterprise detector exists. Returning
+// CE's engine rather than nil keeps the wiring above honest: the seam is
+// resolved and exercised, and the day a dictionary- or SLM-backed detector
+// lands it is composed here and nothing else in this file changes.
+func enterpriseDetector(cfg config.Config) (redact.Detector, error) {
+	return gateway.BuildRedactEngine(cfg)
 }

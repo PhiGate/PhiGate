@@ -19,6 +19,14 @@ const (
 
 // Record is one accounted request.
 type Record struct {
+	// Tenant is the API key's tenant label, so consumption can be attributed.
+	//
+	// The community edition's Ledger ignores it — its totals are process-wide,
+	// which is what a single-tenant PoC needs. It is recorded here rather than
+	// added later because a quota is per-tenant or it is not a quota, and a
+	// LedgerStore that wants to enforce one cannot reconstruct the attribution
+	// after the fact.
+	Tenant string
 	// Route is where the answer came from.
 	Route Route
 	// Model is the upstream model actually used.
@@ -82,7 +90,31 @@ type LedgerStore interface {
 	Totals() Totals
 }
 
+// TenantLedger is the optional half of the seam: a store that attributes
+// consumption to tenants and can answer what one has spent.
+//
+// It is separate from LedgerStore rather than folded into it so the community
+// edition is not obliged to pretend. Its Ledger keeps process-wide totals in
+// memory, which is honest for a PoC and useless as a quota — a rolling update
+// or a crash resets every tenant to zero. A store that can answer these
+// questions durably implements this too, and the gateway type-asserts for it.
+//
+// Callers must treat a "not implemented" result as "no limit known", never as
+// "limit reached": failing closed on a missing ledger would turn an accounting
+// outage into an outage.
+type TenantLedger interface {
+	LedgerStore
+	// TenantTotals is one tenant's snapshot, shaped like the process-wide one.
+	TenantTotals(tenant string) Totals
+	// Consumed reports the tokens a tenant has spent since a point in time,
+	// which is what a period-bounded budget is checked against.
+	Consumed(tenant string, since time.Time) (prompt, completion int64)
+}
+
 // Compile-time proof that the in-memory ledger satisfies the seam.
+//
+// It deliberately does not satisfy TenantLedger. Declaring that it did would
+// make every budget check silently answer for the whole process.
 var _ LedgerStore = (*Ledger)(nil)
 
 // Ledger accumulates token and money accounting across the process lifetime.

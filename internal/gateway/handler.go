@@ -44,6 +44,7 @@ type requestPlan struct {
 	baseline  int
 	promptEst int
 	cacheKey  string
+	probe     cache.Probe
 	event     audit.Event
 	start     time.Time
 }
@@ -197,6 +198,13 @@ func (g *Gateway) plan(st *runtimeState, r *http.Request, req *types.ChatComplet
 		keyParts = append(append([]string(nil), compressedTexts...), string(p.tools))
 	}
 	p.cacheKey = cache.Key(g.modelFor(routed.Target), keyParts, req.Temperature, req.MaxTokens)
+	p.probe = cache.Probe{
+		Key:         p.cacheKey,
+		Model:       g.modelFor(routed.Target),
+		Texts:       keyParts,
+		Temperature: req.Temperature,
+		MaxTokens:   req.MaxTokens,
+	}
 
 	p.event = audit.Event{
 		RequestID:       requestIDOf(r),
@@ -255,7 +263,7 @@ func (g *Gateway) blockingResponse(w http.ResponseWriter, r *http.Request, p *re
 	// The cache holds answers *before* hydration, so a hit is re-hydrated with
 	// this session's dictionary. That is what makes sharing an entry across
 	// sessions and tenants both correct and safe.
-	if e, ok := g.cache.Get(p.cacheKey); ok {
+	if e, ok := g.cacheGet(p); ok {
 		g.metrics.cacheOps.Inc("hit")
 		p.event.CacheHit = true
 		g.serveCached(w, p, req, e)
@@ -320,6 +328,7 @@ func (g *Gateway) blockingResponse(w http.ResponseWriter, r *http.Request, p *re
 		usage.CompletionTokens = g.counter.Estimate(answerText(resp))
 	}
 	g.finish(p, tokens.Record{
+		Tenant:           p.tenant,
 		Route:            routeOf(p.routed.Target),
 		Model:            model,
 		BaselineTokens:   p.baseline,
@@ -348,6 +357,7 @@ func (g *Gateway) serveCached(w http.ResponseWriter, p *requestPlan, req *types.
 	resp.PhiGate = meta
 
 	g.finish(p, tokens.Record{
+		Tenant:           p.tenant,
 		Route:            tokens.RouteCache,
 		Model:            e.Model,
 		BaselineTokens:   p.baseline,
@@ -594,6 +604,19 @@ func (g *Gateway) finish(p *requestPlan, rec tokens.Record, backend string) {
 	}
 	g.metrics.requests.Inc(p.event.Route, p.event.Backend, strconv.Itoa(p.event.Status))
 	g.audit.Log(p.event)
+}
+
+// cacheGet consults the cache, handing a store that can use more than the key
+// the whole probe.
+//
+// The type assertion is the seam: the community edition's exact-match cache
+// does not implement ProbeStore, so it takes the key path and behaves exactly
+// as it did before probes existed.
+func (g *Gateway) cacheGet(p *requestPlan) (cache.Entry, bool) {
+	if ps, ok := g.cache.(cache.ProbeStore); ok {
+		return ps.GetProbe(p.probe)
+	}
+	return g.cache.Get(p.cacheKey)
 }
 
 // backendFor maps a routing target to its client and model.
