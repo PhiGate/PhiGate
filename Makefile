@@ -42,8 +42,20 @@ guarantees:
 	go test -count=1 ./internal/sandbox/ -run 'TestGuardBlocks|TestGuardBypasses|TestGuardDoesNotBlockProse'
 	@echo "== a streamed answer is guarded exactly as a blocking one =="
 	go test -count=1 ./internal/sandbox/ -run 'TestStreamingAgrees|TestScannerByteByByte|TestScannerEverySplit|TestScannerMatchesBlockingPath|TestScannerAmbiguousGrammarHolds'
-	@echo "== cache does not leak across sessions =="
-	go test -count=1 ./internal/gateway/ -run 'TestTemplateCache|TestPolicyForbids|TestDebugEndpoint|TestAuthentication'
+	@echo "== cache does not leak across sessions, nor answer the wrong question =="
+	go test -count=1 ./internal/gateway/ -run 'TestTemplateCache|TestPolicyForbids|TestDebugEndpoint|TestAuthentication|TestShapeKeying|TestCacheHitsAcross'
+	@echo "== tool calls are masked, classified and guarded like anything else =="
+	go test -count=1 ./internal/gateway/ -run 'TestToolCall|TestToolDefinition|TestStreamReassembles|TestStreamGuardsToolCall|TestStreamToolCalls|TestStreamingToolCall'
+	@echo "== a tenant may narrow what the operator configured, never widen it =="
+	go test -count=1 ./internal/config/ -run 'TestTenant|TestFailed|TestUnknownKey'
+	@echo "== a failed reload changes nothing =="
+	go test -count=1 ./internal/gateway/ -run 'TestFailedReload|TestReload'
+	@echo "== the enterprise detector can never find less than the community one =="
+	cd ee && go test -count=1 ./redact/slm/ -run 'TestCommunityLeakCorpus|TestDetectsEverything|TestOrdinaryProse'
+	@echo "== the audit chain makes tampering evident =="
+	cd ee && go test -count=1 ./audit/worm/ -run 'TestAltering|TestRemoving|TestReplacing|TestChainSurvives|TestPrune'
+	@echo "== a quota survives a restart =="
+	cd ee && go test -count=1 ./tokens/durable/ -run 'TestConsumptionSurvives|TestTenantsDoNot|TestPeriods'
 
 ## ee: build the enterprise edition module (separate go.mod, own dependencies)
 ##

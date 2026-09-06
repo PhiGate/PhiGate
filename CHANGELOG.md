@@ -12,6 +12,28 @@ read.
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-09-06
+
+**Read the first entry under "Changed — what may leave the network" before
+upgrading.** PhiGate's headline guarantee — that no credential or personal datum
+leaves unmasked — was not true for tool-calling traffic, which is the shape an
+agent framework produces and increasingly the majority of what a gateway sees.
+That is fixed, on both the blocking and the streaming paths, and it is the
+reason this release exists.
+
+The rest is the work that makes the product deployable by someone other than its
+author: a configuration file with per-tenant controls and reload on SIGHUP, two
+more backend dialects, `/v1/embeddings` so a RAG corpus is guarded rather than
+only the questions asked of it, and three of the four enterprise seams
+implemented.
+
+Two measurements changed what was built. The template cache, described in the
+README as "the real cost lever", was achieving **4.5%** on the corpus that
+README benchmarks with — keying it on payload shape instead of compressed text
+takes it to **50.5%**, at no new risk. And the semantic cache tier this release
+was going to add is deliberately **not** built; the number that would justify it
+does not exist yet, and `phigate-eval cache` is the subcommand that says so.
+
 ### Added
 
 - **Enterprise edition: a tamper-evident audit chain** (`ee/audit/worm`), the
@@ -582,7 +604,8 @@ anyone who clones the repository.
   no credential-shaped literal exists in the repository. `TestNoLiteralCredentialsInCorpus`
   enforces this for future contributors.
 
-[Unreleased]: https://github.com/phigate/phigate/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/phigate/phigate/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/phigate/phigate/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/phigate/phigate/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/phigate/phigate/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/phigate/phigate/compare/v0.1.0...v0.2.0
