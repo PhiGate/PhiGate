@@ -47,6 +47,7 @@ func (g *Gateway) Routes() http.Handler {
 	}
 
 	mux.Handle("/v1/chat/completions", spend(g.handleChatCompletions))
+	mux.Handle("/v1/embeddings", spend(g.handleEmbeddings))
 	mux.Handle("/v1/models", protect(g.handleModels))
 	mux.Handle("/v1/phigate/stats", protect(g.handleStats))
 	mux.Handle("/v1/phigate/rules", protect(g.handleRules))

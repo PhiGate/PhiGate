@@ -208,6 +208,49 @@ func (c *OpenAIClient) doStream(ctx context.Context, req *types.ChatCompletionRe
 	return nil
 }
 
+// Embed implements Embedder by POSTing to the provider's embeddings endpoint.
+func (c *OpenAIClient) Embed(ctx context.Context, req *types.EmbeddingsRequest) (*types.EmbeddingsResponse, error) {
+	if !c.brk.allow() {
+		return nil, fmt.Errorf("%s backend: %w", c.cfg.Name, ErrCircuitOpen)
+	}
+	out, err := c.doEmbed(ctx, req)
+	if err != nil {
+		c.brk.failure()
+		return nil, err
+	}
+	c.brk.success()
+	return out, nil
+}
+
+func (c *OpenAIClient) doEmbed(ctx context.Context, req *types.EmbeddingsRequest) (*types.EmbeddingsResponse, error) {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("marshal request: %w", err)
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.cfg.embeddingsEndpoint(req.Model), bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	c.cfg.authorize(httpReq)
+
+	resp, err := c.http.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("%s backend request failed: %w", c.cfg.Name, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+		return nil, &StatusError{Backend: c.cfg.Name, Status: resp.StatusCode, Body: strings.TrimSpace(string(b))}
+	}
+	var out types.EmbeddingsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("decode %s response: %w", c.cfg.Name, err)
+	}
+	return &out, nil
+}
+
 // Probe checks that the backend is reachable, for the readiness endpoint.
 // It lists models where the provider supports it and falls back to a HEAD on
 // the base URL otherwise.

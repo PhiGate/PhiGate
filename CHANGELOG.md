@@ -27,6 +27,15 @@ read.
   retention refuses to remove a segment younger than the configured period, with
   a zero retention deleting nothing.
 
+- **`POST /v1/embeddings`.** In a RAG deployment the text sent for embedding is
+  the corpus, which is the most sensitive traffic the gateway will ever see, and
+  until now a client doing retrieval had to send it straight to the provider
+  past every control PhiGate offers. Inputs are masked and classified, the
+  egress policy binds, and nothing is hydrated back because the response is a
+  vector. The vectors therefore describe the masked text: a query embedded
+  through the same gateway and session is masked identically, so retrieval
+  matches — indexing through PhiGate and querying around it will not work.
+
 - **Per-tenant token budgets.** `token_budget` caps what a tenant may spend in a
   budget period, where the rate limit caps how fast it may ask: a hundred
   well-spaced requests carrying a megabyte each pass any rate limit and are what
@@ -94,6 +103,20 @@ read.
   conversations could land on a replica that had never seen their dictionary.
   `service.sessionAffinity` is now available and values.yaml documents which
   state is per-process and why.
+
+### Fixed — routing
+
+- **The router was quietly wrong for Japanese traffic**, in two ways that
+  compounded. Its size threshold counted *runes*, and `internal/tokens`
+  documents that CJK tokenizes at roughly one token per character where Latin
+  runs about four — so a Japanese payload was escalated to the cloud at about a
+  quarter of the size of an equivalent English one, which is the opposite of
+  what a gateway sold on keeping Japanese data local should do. The threshold is
+  now in estimated tokens, using the same CJK-aware estimator the rest of the
+  gateway prices with. And the "known simple error" list was entirely English
+  literals, so a Japanese ticket matched none of them and reached the local
+  backend by fallthrough rather than by a decision the audit record could
+  explain; the Japanese equivalents are now recognised.
 
 ### Changed — what may leave the network
 

@@ -84,6 +84,27 @@ func (p ProviderConfig) endpoint(model string) string {
 	}
 }
 
+// embeddingsEndpoint returns the embeddings URL for a model.
+//
+// Azure addresses a deployment rather than a model, and an embeddings
+// deployment is a different one from a chat deployment, so the configured
+// Deployment is deliberately not reused here — the model name from the request
+// is what names it.
+func (p ProviderConfig) embeddingsEndpoint(model string) string {
+	base := strings.TrimRight(p.BaseURL, "/")
+	switch p.Provider {
+	case ProviderAzure:
+		version := p.APIVersion
+		if version == "" {
+			version = DefaultAzureAPIVersion
+		}
+		return fmt.Sprintf("%s/openai/deployments/%s/embeddings?api-version=%s",
+			base, model, version)
+	default:
+		return base + "/embeddings"
+	}
+}
+
 // DefaultAzureAPIVersion is used when none is configured.
 const DefaultAzureAPIVersion = "2024-10-21"
 

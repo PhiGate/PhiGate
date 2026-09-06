@@ -14,6 +14,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/phigate/phigate/internal/tokens"
 )
 
 // Target identifies where a request should be sent.
@@ -48,13 +50,26 @@ type Router interface {
 // local SLM for cheap, well-understood errors and escalates anything large,
 // multi-template, or code-bearing to the cloud.
 type HeuristicRouter struct {
-	maxLocalLines int // distinct template lines above which we escalate
-	maxLocalRunes int // payload size (runes) above which we escalate
+	maxLocalLines  int // distinct template lines above which we escalate
+	maxLocalTokens int // payload size (estimated tokens) above which we escalate
+	counter        tokens.Counter
 }
 
 // NewHeuristicRouter returns a router with default thresholds.
+//
+// The size threshold is in *tokens*, not runes. It was runes, and that made the
+// router quietly wrong for the market this product is aimed at: internal/tokens
+// documents that CJK text tokenizes at roughly one token per character where
+// Latin text runs about four, so 400 runes of English is ~100 tokens and 400
+// runes of Japanese is ~400. A Japanese payload was escalated to the cloud at
+// roughly a quarter of the size an equivalent English one was — the opposite of
+// what a gateway sold on keeping Japanese data local should do.
 func NewHeuristicRouter() *HeuristicRouter {
-	return &HeuristicRouter{maxLocalLines: 3, maxLocalRunes: 400}
+	return &HeuristicRouter{
+		maxLocalLines:  3,
+		maxLocalTokens: 120,
+		counter:        tokens.NewHeuristic(),
+	}
 }
 
 // codeMarkers indicate an AST-pruned code/config snippet (handled best by a
@@ -64,6 +79,28 @@ var codeMarkers = regexp.MustCompile(`<id>|<type>|<str>|\b(func|def|class|return
 // simpleSignals are well-known single-component infrastructure errors that a
 // local SLM can confidently triage and map to an automation runbook.
 var simpleSignals = regexp.MustCompile(`(?i)\b(connection refused|timed? out|timeout|disk (is )?full|no space left|out of memory|oomkilled|permission denied|no such file|cannot connect|refused to connect|502|503|504|gateway timeout|connection reset)\b`)
+
+// simpleSignalsJA is the same set in Japanese.
+//
+// It exists because the list above is entirely English literals, so a Japanese
+// ticket matched none of them and fell through to the default. That default is
+// "try local", so this is not the difference between local and cloud on its own
+// — it is the difference between a *reasoned* local decision an audit record can
+// explain and a fallthrough, and combined with the rune threshold above it was
+// most of why Japanese traffic behaved differently from English traffic.
+//
+// No word boundaries: Japanese does not delimit words with spaces, and \b
+// against CJK matches in places that have nothing to do with word starts.
+var simpleSignalsJA = regexp.MustCompile(
+	`接続(が)?(拒否|できません|失敗|リセット)` +
+		`|接続拒否` +
+		`|タイムアウト` +
+		`|(ディスク|ディスク容量|空き容量|容量)(が)?(不足|いっぱい|足りません)` +
+		`|メモリ(ー)?(が)?不足` +
+		`|(アクセス)?(権限|パーミッション)(が)?(ありません|拒否|エラー)` +
+		`|ファイルが(見つかりません|存在しません)` +
+		`|応答(が)?(ありません|しません)` +
+		`|起動(でき|し)ません`)
 
 // Route classifies the compressed payload.
 func (r *HeuristicRouter) Route(_ context.Context, compressed string) (Decision, error) {
@@ -79,12 +116,12 @@ func (r *HeuristicRouter) Route(_ context.Context, compressed string) (Decision,
 	if len(lines) > r.maxLocalLines {
 		return Decision{TargetCloud, "multi-template payload (" + strconv.Itoa(len(lines)) + " lines)"}, nil
 	}
-	if runes := len([]rune(trimmed)); runes > r.maxLocalRunes {
-		return Decision{TargetCloud, "large payload (" + strconv.Itoa(runes) + " runes)"}, nil
+	if est := r.counter.Estimate(trimmed); est > r.maxLocalTokens {
+		return Decision{TargetCloud, "large payload (~" + strconv.Itoa(est) + " tokens)"}, nil
 	}
 
 	// 3. A recognised simple infra error on a small payload -> local SLM.
-	if simpleSignals.MatchString(trimmed) {
+	if simpleSignals.MatchString(trimmed) || simpleSignalsJA.MatchString(trimmed) {
 		return Decision{TargetLocal, "known simple infrastructure error"}, nil
 	}
 

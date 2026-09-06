@@ -264,6 +264,28 @@ X-PhiGate-Sensitivity: internal   X-PhiGate-Tokens-Saved: 61
 X-PhiGate-Compression: 78% saved
 ```
 
+### Embeddings, for RAG
+
+In a retrieval deployment the text sent for embedding **is** the corpus — the
+tickets, the contracts, the notes. It is the most sensitive traffic a gateway
+will ever see, and guarding the questions while the documents go straight to the
+provider is guarding the wrong half.
+
+```bash
+curl localhost:8080/v1/embeddings -H 'Authorization: Bearer my-client-key' \
+  -H 'Content-Type: application/json' -H 'X-PhiGate-Session: corpus-1' \
+  -d '{"model":"text-embedding-3-small","input":["従業員 1234 5678 9018 の記録"]}'
+```
+
+Inputs are masked and classified like any other payload, and the egress policy
+binds: a corpus it confines to local is embedded locally or not at all.
+
+One property decides whether a deployment works. The vectors describe the
+**masked** text, so the index holds embeddings of masked text — and a query
+embedded through the same gateway with the same session dictionary is masked the
+same way, so retrieval matches. Index through PhiGate and query around it and it
+will not. That is the design, not a defect in it.
+
 **Kubernetes:** `helm install phigate deploy/helm/phigate --set secrets.apiKeys="key:team"`
 
 ---
@@ -273,6 +295,7 @@ X-PhiGate-Compression: 78% saved
 | Endpoint | Auth | Purpose |
 |---|---|---|
 | `POST /v1/chat/completions` | ✅ | OpenAI-compatible, streaming and blocking |
+| `POST /v1/embeddings` | ✅ | inputs masked before they leave; the egress policy binds |
 | `GET /v1/models` | ✅ | model listing (clients call this on startup) |
 | `GET /v1/phigate/stats` | ✅ | tokens and money saved, cache, backends |
 | `GET /v1/phigate/rules` | ✅ | effective controls, for auditors |

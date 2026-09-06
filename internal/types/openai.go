@@ -491,6 +491,107 @@ type ChatCompletionChunk struct {
 	Choices []ChunkChoice `json:"choices"`
 }
 
+// EmbeddingsRequest is the inbound POST /v1/embeddings body.
+//
+// Input arrives as a string, an array of strings, or an array of token ids.
+// Only the text forms carry anything to mask; a pre-tokenised request is passed
+// through, and Texts reports empty so the caller can tell the difference.
+type EmbeddingsRequest struct {
+	Model string
+	Raw   json.RawMessage // the original "input", for passthrough
+	Texts []string        // the text form, when it was one
+
+	Extra map[string]json.RawMessage
+}
+
+// UnmarshalJSON parses the known fields and captures the rest.
+func (r *EmbeddingsRequest) UnmarshalJSON(b []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return err
+	}
+	r.Extra = map[string]json.RawMessage{}
+	for k, v := range raw {
+		switch k {
+		case "model":
+			_ = json.Unmarshal(v, &r.Model)
+		case "input":
+			r.Raw = append(json.RawMessage(nil), v...)
+		default:
+			r.Extra[k] = v
+		}
+	}
+	if len(r.Raw) == 0 {
+		return fmt.Errorf("input is required")
+	}
+	var one string
+	if err := json.Unmarshal(r.Raw, &one); err == nil {
+		r.Texts = []string{one}
+		return nil
+	}
+	var many []string
+	if err := json.Unmarshal(r.Raw, &many); err == nil {
+		r.Texts = many
+		return nil
+	}
+	// Token-id input: nothing to mask, and nothing this gateway can usefully
+	// say about it. It rides through untouched.
+	return nil
+}
+
+// MarshalJSON re-emits the request, writing Texts back into the shape input
+// arrived in.
+func (r EmbeddingsRequest) MarshalJSON() ([]byte, error) {
+	out := map[string]json.RawMessage{}
+	for k, v := range r.Extra {
+		out[k] = v
+	}
+	m, _ := json.Marshal(r.Model)
+	out["model"] = m
+
+	if len(r.Texts) == 0 {
+		out["input"] = r.Raw
+		return json.Marshal(out)
+	}
+	// A single string in must be a single string out: some providers return a
+	// differently shaped response for an array, and a proxy that silently
+	// changed the request shape would change the answer's.
+	var in []byte
+	var err error
+	if isJSONString(r.Raw) && len(r.Texts) == 1 {
+		in, err = json.Marshal(r.Texts[0])
+	} else {
+		in, err = json.Marshal(r.Texts)
+	}
+	if err != nil {
+		return nil, err
+	}
+	out["input"] = in
+	return json.Marshal(out)
+}
+
+func isJSONString(raw json.RawMessage) bool {
+	var s string
+	return json.Unmarshal(raw, &s) == nil
+}
+
+// Embedding is one vector in an embeddings response.
+type Embedding struct {
+	Object    string    `json:"object"`
+	Index     int       `json:"index"`
+	Embedding []float64 `json:"embedding"`
+}
+
+// EmbeddingsResponse is the outbound POST /v1/embeddings body.
+type EmbeddingsResponse struct {
+	Object string      `json:"object"`
+	Data   []Embedding `json:"data"`
+	Model  string      `json:"model"`
+	Usage  Usage       `json:"usage"`
+	// PhiGate reports what it did, as it does on a completion.
+	PhiGate *Meta `json:"phigate,omitempty"`
+}
+
 // Model is one entry in a /v1/models listing.
 type Model struct {
 	ID      string `json:"id"`

@@ -1564,3 +1564,184 @@ func TestBudgetDoesNotBlockTheReportingEndpoints(t *testing.T) {
 		}
 	}
 }
+
+// embeddingClient is a fakeClient that also implements llm.Embedder.
+type embeddingClient struct {
+	*fakeClient
+	got *types.EmbeddingsRequest
+}
+
+func (e *embeddingClient) Embed(_ context.Context, req *types.EmbeddingsRequest) (*types.EmbeddingsResponse, error) {
+	e.got = req
+	data := make([]types.Embedding, len(req.Texts))
+	for i := range req.Texts {
+		data[i] = types.Embedding{Object: "embedding", Index: i, Embedding: []float64{0.1, 0.2}}
+	}
+	return &types.EmbeddingsResponse{
+		Object: "list", Data: data, Model: req.Model,
+		Usage: types.Usage{PromptTokens: 5, TotalTokens: 5},
+	}, nil
+}
+
+func postEmbeddings(t *testing.T, g *Gateway, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	g.Routes().ServeHTTP(rec, httptest.NewRequest("POST", "/v1/embeddings", strings.NewReader(body)))
+	return rec
+}
+
+// TestEmbeddingsAreMasked is the point of the endpoint. In a RAG deployment the
+// text sent for embedding is the corpus — the tickets, the contracts, the
+// notes — and it is the most sensitive traffic the gateway sees.
+func TestEmbeddingsAreMasked(t *testing.T) {
+	local := &embeddingClient{fakeClient: &fakeClient{name: "local"}}
+	cloud := &embeddingClient{fakeClient: &fakeClient{name: "cloud"}}
+	g := newTestGateway(t, testConfig(), local, cloud)
+
+	rec := postEmbeddings(t, g, `{"model":"text-embedding-3-small",
+	  "input":["従業員 1234 5678 9018 の記録","host web-1.corp is down"]}`)
+	if rec.Code != 200 {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// A My Number is confidential, so the policy confines this to local.
+	sent := local.got
+	if sent == nil {
+		t.Fatal("the corpus did not reach the local backend")
+	}
+	for _, txt := range sent.Texts {
+		for _, secret := range []string{"1234 5678 9018", "web-1.corp"} {
+			if strings.Contains(txt, secret) {
+				t.Errorf("raw value %q was sent for embedding: %q", secret, txt)
+			}
+		}
+	}
+	if cloud.got != nil {
+		t.Error("a corpus containing a My Number was embedded in the cloud")
+	}
+	if rec.Header().Get("X-PhiGate-Sensitivity") != "confidential" {
+		t.Errorf("sensitivity = %q, want confidential", rec.Header().Get("X-PhiGate-Sensitivity"))
+	}
+}
+
+// TestEmbeddingsShareTheSessionDictionary is what makes retrieval work: a
+// document and a query embedded through the same session must mask the same
+// value to the same placeholder, or the vectors describe different text.
+func TestEmbeddingsShareTheSessionDictionary(t *testing.T) {
+	local := &embeddingClient{fakeClient: &fakeClient{name: "local"}}
+	cloud := &embeddingClient{fakeClient: &fakeClient{name: "cloud"}}
+	g := newTestGateway(t, testConfig(), local, cloud)
+
+	// An internal hostname is cloud-eligible under the default policy, so which
+	// backend serves this is the policy's business and not what is under test.
+	post := func(input string) []string {
+		local.got, cloud.got = nil, nil
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("POST", "/v1/embeddings",
+			strings.NewReader(`{"model":"m","input":`+quote(input)+`}`))
+		req.Header.Set("X-PhiGate-Session", "corpus-1")
+		g.Routes().ServeHTTP(rec, req)
+		if rec.Code != 200 {
+			t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+		}
+		if local.got != nil {
+			return local.got.Texts
+		}
+		if cloud.got == nil {
+			t.Fatal("no backend received the request")
+		}
+		return cloud.got.Texts
+	}
+
+	doc := post("incident on host web-1.corp at 03:00")
+	query := post("what happened on web-1.corp?")
+
+	// Both must contain the same placeholder for the same host.
+	tok := placeholderIn(doc[0])
+	if tok == "" {
+		t.Fatalf("the document was not masked: %q", doc[0])
+	}
+	if !strings.Contains(query[0], tok) {
+		t.Errorf("the query masked the same host to a different token:\n doc:   %q\n query: %q",
+			doc[0], query[0])
+	}
+}
+
+func placeholderIn(s string) string {
+	i := strings.Index(s, "<V")
+	if i < 0 {
+		return ""
+	}
+	j := strings.Index(s[i:], ">")
+	if j < 0 {
+		return ""
+	}
+	return s[i : i+j+1]
+}
+
+// TestEmbeddingsPreserveTheInputShape: a single string in must be a single
+// string out. Some providers answer differently for an array, and a proxy that
+// silently changed the request shape would change the answer's.
+func TestEmbeddingsPreserveTheInputShape(t *testing.T) {
+	local := &embeddingClient{fakeClient: &fakeClient{name: "local"}}
+	cloud := &embeddingClient{fakeClient: &fakeClient{name: "cloud"}}
+	g := newTestGateway(t, testConfig(), local, cloud)
+
+	postEmbeddings(t, g, `{"model":"m","input":"従業員 1234 5678 9018 の記録"}`)
+	out, err := json.Marshal(embeddedBy(t, local, cloud))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), `"input":"`) {
+		t.Errorf("a string input was re-emitted as something else: %s", out)
+	}
+}
+
+// embeddedBy returns the request whichever backend actually received it.
+// Which one that is belongs to the egress policy, not to a test asserting on
+// the request's shape.
+func embeddedBy(t *testing.T, local, cloud *embeddingClient) *types.EmbeddingsRequest {
+	t.Helper()
+	if local.got != nil {
+		return local.got
+	}
+	if cloud.got == nil {
+		t.Fatal("no backend received the request")
+	}
+	return cloud.got
+}
+
+// TestEmbeddingsRejectABackendThatCannotEmbed says so plainly rather than
+// forwarding the request to find out.
+func TestEmbeddingsRejectABackendThatCannotEmbed(t *testing.T) {
+	// Plain fakeClients implement Client but not Embedder.
+	g := newTestGateway(t, testConfig(), &fakeClient{name: "local"}, &fakeClient{name: "cloud"})
+
+	rec := postEmbeddings(t, g, `{"model":"m","input":"web-1.corp"}`)
+	if rec.Code != 501 {
+		t.Fatalf("status %d, want 501", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "embeddings_unsupported") {
+		t.Errorf("the error does not name the problem: %s", rec.Body.String())
+	}
+}
+
+// TestEmbeddingsPassTokenInputThrough: a pre-tokenised request has nothing to
+// mask and must not be mangled.
+func TestEmbeddingsPassTokenInputThrough(t *testing.T) {
+	local := &embeddingClient{fakeClient: &fakeClient{name: "local"}}
+	cloud := &embeddingClient{fakeClient: &fakeClient{name: "cloud"}}
+	g := newTestGateway(t, testConfig(), local, cloud)
+
+	rec := postEmbeddings(t, g, `{"model":"m","input":[1212,318,257,1332]}`)
+	if rec.Code != 200 {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	out, err := json.Marshal(embeddedBy(t, local, cloud))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "1212") {
+		t.Errorf("token input was lost: %s", out)
+	}
+}

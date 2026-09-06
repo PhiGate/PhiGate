@@ -31,3 +31,14 @@ type Client interface {
 	// Name identifies the backend for logs/audit ("local" or "cloud").
 	Name() string
 }
+
+// Embedder is the optional half of the client contract, implemented by a
+// backend that can produce embeddings.
+//
+// It is separate from Client so that a backend which cannot is not obliged to
+// return an error from a method it should never have had — and so the gateway
+// can tell a caller "this backend does not do embeddings" rather than passing
+// the request on to find out.
+type Embedder interface {
+	Embed(ctx context.Context, req *types.EmbeddingsRequest) (*types.EmbeddingsResponse, error)
+}
