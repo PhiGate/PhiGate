@@ -35,9 +35,11 @@ import (
 	"time"
 
 	"github.com/phigate/phigate/internal/compressor"
+	"github.com/phigate/phigate/internal/llm"
 	"github.com/phigate/phigate/internal/redact"
 	"github.com/phigate/phigate/internal/router"
 	"github.com/phigate/phigate/internal/tokens"
+	"github.com/phigate/phigate/internal/types"
 )
 
 func main() {
@@ -72,6 +74,7 @@ func usage() {
   eval   -cases <file.json>     answer quality: raw cloud vs through PhiGate, judged
          -dry-run               print the call count, token estimate and bill; call nothing
          -repeat N              runs per case; one score is a sample, not a measurement
+         -baseline-provider     openai|azure|anthropic|bedrock for the raw arm
   cache  -dir <path>            template cache hit rate, and the headroom a
                                 semantic tier would have to beat
   leak   -dir <path>            assert no secret in a corpus survives redaction
@@ -475,6 +478,8 @@ func runEval(args []string) error {
 	gatewayKey := fs.String("gateway-key", os.Getenv("PHIGATE_CLIENT_KEY"), "PhiGate API key")
 	baseline := fs.String("baseline", "https://api.openai.com/v1", "baseline (uncompressed) base URL")
 	baselineKey := fs.String("baseline-key", os.Getenv("OPENAI_API_KEY"), "baseline API key")
+	baselineProvider := fs.String("baseline-provider", "openai", "baseline dialect: openai|azure|anthropic|bedrock")
+	baselineRegion := fs.String("baseline-region", os.Getenv("AWS_REGION"), "AWS region, for -baseline-provider bedrock")
 	model := fs.String("model", "gpt-4o", "model to answer with")
 	judgeModel := fs.String("judge", "gpt-4o", "model to score answers")
 	repeat := fs.Int("repeat", 1, "runs per case; a single score is a sample, not a measurement")
@@ -509,6 +514,24 @@ func runEval(args []string) error {
 		return dryRunEval(doc.Cases, counter, *model, *judgeModel, *repeat, *priceBook)
 	}
 
+	// The baseline arm goes straight to the customer's real provider, so it
+	// speaks whichever dialect that is. The gateway arm below stays raw
+	// OpenAI-shaped HTTP on purpose: PhiGate only speaks that, which is its
+	// whole proposition, and the arm has to read the X-PhiGate-* headers that
+	// a typed client would discard.
+	prov, err := llm.ParseProvider(*baselineProvider)
+	if err != nil {
+		return fmt.Errorf("-baseline-provider: %w", err)
+	}
+	direct, err := llm.NewBackend(llm.ProviderConfig{
+		Name: "baseline", Provider: prov, BaseURL: *baseline,
+		Model: *model, APIKey: *baselineKey, Region: *baselineRegion,
+		Timeout: 3 * time.Minute,
+	})
+	if err != nil {
+		return err
+	}
+
 	ctx := context.Background()
 	results := make([]evalResult, 0, len(doc.Cases))
 
@@ -520,24 +543,24 @@ func runEval(args []string) error {
 		var comment, route string
 		var rawTok, gatedTok int
 
-		for range *repeat {
+		for run := range *repeat {
 			// Baseline: the raw prompt straight to the cloud model — what the
 			// enterprise does today, without PhiGate.
-			rawAnswer, _, err := ask(ctx, *baseline, *baselineKey, *model, c.Prompt)
+			rawAnswer, err := askDirect(ctx, direct, *model, c.Prompt)
 			if err != nil {
 				return fmt.Errorf("baseline %s: %w", c.Name, err)
 			}
 			// Through PhiGate: compressed, anonymised, routed.
-			gatedAnswer, hdr, err := ask(ctx, *gateway, *gatewayKey, *model, c.Prompt)
+			gatedAnswer, meta, err := ask(ctx, *gateway, *gatewayKey, *model, c.Prompt)
 			if err != nil {
 				return fmt.Errorf("phigate %s: %w", c.Name, err)
 			}
 
-			rawScore, cmt, err := judge(ctx, *baseline, *baselineKey, *judgeModel, c, rawAnswer)
+			rawScore, cmt, err := judge(ctx, direct, *judgeModel, c, rawAnswer)
 			if err != nil {
 				return fmt.Errorf("judge baseline %s: %w", c.Name, err)
 			}
-			gatedScore, _, err := judge(ctx, *baseline, *baselineKey, *judgeModel, c, gatedAnswer)
+			gatedScore, _, err := judge(ctx, direct, *judgeModel, c, gatedAnswer)
 			if err != nil {
 				return fmt.Errorf("judge phigate %s: %w", c.Name, err)
 			}
@@ -545,9 +568,23 @@ func runEval(args []string) error {
 			rawScores = append(rawScores, rawScore)
 			gatedScores = append(gatedScores, gatedScore)
 			comment = cmt
-			route = hdr.Get("X-PhiGate-Route")
-			rawTok = counter.Estimate(c.Prompt)
-			gatedTok = atoiHeader(hdr.Get("X-PhiGate-Tokens-Saved"))
+
+			// Savings are taken from the *first* run only, on a cold cache.
+			//
+			// Repeats exist to measure judge noise, not to warm the cache, and
+			// reading a later one turns the repeat count into a savings
+			// multiplier: every repeat after the first is an exact cache hit,
+			// which saves the whole baseline. Measured on these eight cases,
+			// reading the last run reported 100% where the cold truth is 64%.
+			// A benchmark that gets more flattering the more times you run it
+			// is measuring itself.
+			if run == 0 {
+				route = meta.Route
+				// Both figures are PhiGate's own, so the ratio between them is
+				// consistent by construction.
+				rawTok = meta.BaselineTokens
+				gatedTok = meta.TokensSaved
+			}
 		}
 
 		saving := 0.0
@@ -603,9 +640,37 @@ func runEval(args []string) error {
 	return nil
 }
 
-// ask sends one prompt and returns the answer plus the response headers, so the
-// caller can read PhiGate's routing and savings metadata.
-func ask(ctx context.Context, baseURL, key, model, prompt string) (string, http.Header, error) {
+// askDirect sends one prompt to the baseline provider, in that provider's own
+// dialect.
+//
+// It reuses the gateway's own backend clients rather than a second HTTP shim,
+// so a baseline against Claude or Bedrock is exercised by the same translation
+// the product ships — a benchmark whose two arms disagree about the wire format
+// is measuring the harness.
+func askDirect(ctx context.Context, c llm.Client, model, prompt string) (string, error) {
+	resp, err := c.Chat(ctx, &types.ChatCompletionRequest{
+		Model:    model,
+		Messages: []types.Message{{Role: "user", Content: prompt}},
+	})
+	if err != nil {
+		return "", err
+	}
+	if len(resp.Choices) == 0 {
+		return "", fmt.Errorf("no choices returned")
+	}
+	return resp.Choices[0].Message.Content, nil
+}
+
+// ask sends one prompt through PhiGate and returns the answer plus PhiGate's
+// own report of what it did.
+//
+// The savings figure is read from that report rather than recomputed here. It
+// was recomputed here, against this file's own estimate of the prompt, and the
+// two denominators did not agree: PhiGate's baseline counts per-message
+// overhead and this one counts the prompt text, so a locally-routed case —
+// where the whole baseline is saved — reported saving over 100%. A benchmark
+// that prints an impossible number has told you it is measuring itself.
+func ask(ctx context.Context, baseURL, key, model, prompt string) (string, *types.Meta, error) {
 	body, _ := json.Marshal(map[string]any{
 		"model":    model,
 		"messages": []map[string]string{{"role": "user", "content": prompt}},
@@ -629,20 +694,18 @@ func ask(ctx context.Context, baseURL, key, model, prompt string) (string, http.
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return "", nil, fmt.Errorf("status %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
 	}
-	var out struct {
-		Choices []struct {
-			Message struct {
-				Content string `json:"content"`
-			} `json:"message"`
-		} `json:"choices"`
-	}
+	var out types.ChatCompletionResponse
 	if err := json.Unmarshal(b, &out); err != nil {
 		return "", nil, err
 	}
 	if len(out.Choices) == 0 {
-		return "", resp.Header, fmt.Errorf("no choices returned")
+		return "", out.PhiGate, fmt.Errorf("no choices returned")
 	}
-	return out.Choices[0].Message.Content, resp.Header, nil
+	if out.PhiGate == nil {
+		return "", nil, fmt.Errorf("the gateway returned no phigate block; " +
+			"is -gateway pointing at PhiGate rather than at the provider?")
+	}
+	return out.Choices[0].Message.Content, out.PhiGate, nil
 }
 
 // judge scores an answer against the case rubric on a 0-10 scale.
@@ -650,7 +713,7 @@ func ask(ctx context.Context, baseURL, key, model, prompt string) (string, http.
 // The judge always runs against the *baseline* endpoint, never through PhiGate.
 // Scoring the gateway with the gateway in the loop would let compression
 // artefacts influence the score that is supposed to measure them.
-func judge(ctx context.Context, baseURL, key, model string, c evalCase, answer string) (float64, string, error) {
+func judge(ctx context.Context, client llm.Client, model string, c evalCase, answer string) (float64, string, error) {
 	prompt := fmt.Sprintf(`You are grading an IT operations assistant's answer.
 
 QUESTION:
@@ -666,7 +729,7 @@ Respond with only JSON: {"score": <0-10 number>, "comment": "<one sentence>"}.
 Grade on technical correctness and actionability. Do not reward verbosity.`,
 		c.Prompt, c.Rubric, answer)
 
-	out, _, err := ask(ctx, baseURL, key, model, prompt)
+	out, err := askDirect(ctx, client, model, prompt)
 	if err != nil {
 		return 0, "", err
 	}
