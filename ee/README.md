@@ -89,7 +89,7 @@ persists or shares hydrated text serves one session's real values to another.
 | `audit.Sink` — tamper-evident chain | **implemented**, `ee/audit/worm` |
 | `tokens.LedgerStore` — durable per-tenant quota | **implemented**, `ee/tokens/durable` |
 | `redact.Detector` — gazetteer + model-backed JP names | **implemented**, `ee/redact/slm` |
-| `cache.Store` — semantic tier | not yet |
+| `cache.Store` — semantic tier | **not built, deliberately** — see below |
 
 `phigate-ee` serves once it has at least one enterprise implementation to offer,
 and refuses without one: it requires `PHIGATE_EE_AUDIT_DIR`, because a binary
@@ -204,6 +204,50 @@ case for the property.
 If the model is slow or unavailable, detection falls back to CE's engine alone
 and the request succeeds. `Stats().Degraded` counts those, because a silent
 degradation is one nobody can alert on.
+
+### The semantic cache, and why it is not here
+
+This seam was going to be filled with an embedded HNSW tier. Before starting, the
+existing exact-match cache was measured on the eight LogHub corpora the README
+benchmarks with — on the reasoning that a tier which buys a small improvement
+with an embedding call per miss, and a class of wrong answer the exact-match
+cache cannot produce, is not worth having.
+
+```bash
+./bin/phigate-eval cache -dir eval/corpus
+```
+
+The measurement found the cache was achieving 4.5%, for a reason that had
+nothing to do with exact matching: the key was built on the compressed text, and
+the session dictionary numbers each value the first time it is ever seen, so the
+same payload twice produced two keys. Keying on the payload's *shape* took it to
+**50.5%** — in the community edition, at no risk, since it is still exact
+matching.
+
+What is left is **44.9%**: the payloads whose shape occurs exactly once. That is
+the entire headroom a semantic tier could ever compete for, and it can only
+convert them by matching a payload to a *different* payload. Against that:
+
+- an embedding call on every miss, which is inference in the request path of a
+  gateway whose pitch includes latency — and which cuts against the case for
+  local deployment on constrained GPU;
+- a wrong-answer mode the current cache does not have. An exact-match cache
+  cannot serve an answer to a different question. A similarity threshold can,
+  and for an operations triage tool a confidently wrong answer is worse than a
+  cache miss;
+- a documented security property given up. `internal/cache` claims to hold no
+  prompt text at all, not even masked text, so a memory dump of the gateway
+  carries no customer payload. An embedding is a lossy but not one-way
+  representation of the text it was built from. The masked text behind it
+  contains placeholders rather than values, which makes the trade defensible —
+  but it is a *new, weaker* property, and it belongs in
+  [THREAT-MODEL.md](../THREAT-MODEL.md) as a named decision rather than
+  inherited quietly.
+
+None of that says never. It says the number to justify it is 44.9% minus
+whatever a threshold actually converts correctly, and nobody has that number
+yet. Measuring hit *precision* needs a labelled corpus, which is the real cost
+of this feature and is where it should start if it is picked up.
 
 Run the Community Edition instead if you do not need these: `cmd/phigate`. CE
 enforces the same budgets against its in-memory ledger, which is honest for as
