@@ -21,11 +21,9 @@ const (
 type Record struct {
 	// Tenant is the API key's tenant label, so consumption can be attributed.
 	//
-	// The community edition's Ledger ignores it — its totals are process-wide,
-	// which is what a single-tenant PoC needs. It is recorded here rather than
-	// added later because a quota is per-tenant or it is not a quota, and a
-	// LedgerStore that wants to enforce one cannot reconstruct the attribution
-	// after the fact.
+	// A quota is per-tenant or it is not a quota, and attribution cannot be
+	// reconstructed once the request has finished, so it is carried here rather
+	// than added when the first store needs it.
 	Tenant string
 	// Route is where the answer came from.
 	Route Route
@@ -93,15 +91,17 @@ type LedgerStore interface {
 // TenantLedger is the optional half of the seam: a store that attributes
 // consumption to tenants and can answer what one has spent.
 //
-// It is separate from LedgerStore rather than folded into it so the community
-// edition is not obliged to pretend. Its Ledger keeps process-wide totals in
-// memory, which is honest for a PoC and useless as a quota — a rolling update
-// or a crash resets every tenant to zero. A store that can answer these
-// questions durably implements this too, and the gateway type-asserts for it.
+// It is separate from LedgerStore so that a store which cannot answer these
+// questions is not obliged to pretend it can. What it does *not* promise is
+// durability. The community edition implements it in memory, which enforces a
+// budget honestly for as long as the process lives and resets every tenant to
+// zero on a rolling update — so a monthly limit backed by it is not a limit.
+// That is the gap the enterprise edition's implementation closes, and it is a
+// different axis from this interface.
 //
-// Callers must treat a "not implemented" result as "no limit known", never as
-// "limit reached": failing closed on a missing ledger would turn an accounting
-// outage into an outage.
+// Callers must treat a store that does not implement this as "no limit known",
+// never as "limit reached": failing closed on a missing ledger would turn an
+// accounting outage into an outage.
 type TenantLedger interface {
 	LedgerStore
 	// TenantTotals is one tenant's snapshot, shaped like the process-wide one.
@@ -111,11 +111,18 @@ type TenantLedger interface {
 	Consumed(tenant string, since time.Time) (prompt, completion int64)
 }
 
-// Compile-time proof that the in-memory ledger satisfies the seam.
+// Compile-time proof that the in-memory ledger satisfies both halves of the
+// seam.
 //
-// It deliberately does not satisfy TenantLedger. Declaring that it did would
-// make every budget check silently answer for the whole process.
-var _ LedgerStore = (*Ledger)(nil)
+// It satisfies TenantLedger because it does genuinely account per tenant. What
+// it does not do is survive a restart, which is a different axis and the one
+// the enterprise edition's implementation exists for — see the note on
+// LedgerStore. A budget checked against this one is honest about a running
+// process and resets to zero on a rolling update.
+var (
+	_ LedgerStore  = (*Ledger)(nil)
+	_ TenantLedger = (*Ledger)(nil)
+)
 
 // Ledger accumulates token and money accounting across the process lifetime.
 //
@@ -129,11 +136,33 @@ type Ledger struct {
 	since  time.Time
 
 	t Totals
+	// perTenant is the same accounting, split by tenant, so a budget can be
+	// checked against what one tenant has spent rather than what the process
+	// has. It is still memory only: this satisfies TenantLedger's shape, not
+	// its usefulness as a monthly quota, which needs durability the enterprise
+	// edition supplies.
+	perTenant map[string]*Totals
+	// spend is when each tenant's consumption was recorded, so Consumed can
+	// answer for a window rather than for all time. One entry per request is
+	// wasteful; one per tenant per minute is enough to bound a budget period
+	// and is what this keeps.
+	spend map[string][]spendPoint
+}
+
+// spendPoint is one minute of one tenant's consumption.
+type spendPoint struct {
+	minute             time.Time
+	prompt, completion int64
 }
 
 // NewLedger returns a Ledger pricing against book.
 func NewLedger(book *PriceBook) *Ledger {
-	return &Ledger{prices: book, since: time.Now()}
+	return &Ledger{
+		prices:    book,
+		since:     time.Now(),
+		perTenant: map[string]*Totals{},
+		spend:     map[string][]spendPoint{},
+	}
 }
 
 // Baseline is the model whose price defines "what this would have cost without
@@ -195,6 +224,96 @@ func (l *Ledger) Record(r Record, baselineModel string) {
 	if tokensSaved > 0 {
 		l.t.TokensSaved += tokensSaved
 	}
+
+	l.recordTenantLocked(r, baselineCost, actual, tokensSaved)
+}
+
+// recordTenantLocked mirrors the process-wide accounting into the tenant's own.
+func (l *Ledger) recordTenantLocked(r Record, baselineCost, actual float64, tokensSaved int64) {
+	if r.Tenant == "" {
+		return
+	}
+	t, ok := l.perTenant[r.Tenant]
+	if !ok {
+		t = &Totals{}
+		l.perTenant[r.Tenant] = t
+	}
+	t.Requests++
+	switch r.Route {
+	case RouteLocal:
+		t.LocalRequests++
+	case RouteCache:
+		t.CacheHits++
+	default:
+		t.CloudRequests++
+		t.CloudCost += actual
+	}
+	if !r.UsageReported {
+		t.EstimatedRequests++
+	}
+	t.PromptTokens += int64(r.PromptTokens)
+	t.CompletionTokens += int64(r.CompletionTokens)
+	t.BaselineTokens += int64(r.BaselineTokens)
+	t.BaselineCost += baselineCost
+	if saved := baselineCost - actual; saved > 0 {
+		t.CostSaved += saved
+	}
+	if tokensSaved > 0 {
+		t.TokensSaved += tokensSaved
+	}
+
+	// Bucket the spend by minute so Consumed can answer for a window without
+	// keeping a point per request.
+	minute := time.Now().UTC().Truncate(time.Minute)
+	pts := l.spend[r.Tenant]
+	if n := len(pts); n > 0 && pts[n-1].minute.Equal(minute) {
+		pts[n-1].prompt += int64(r.PromptTokens)
+		pts[n-1].completion += int64(r.CompletionTokens)
+	} else {
+		pts = append(pts, spendPoint{minute, int64(r.PromptTokens), int64(r.CompletionTokens)})
+	}
+	// A month of minutes is ~44k points per tenant; keep a bounded tail.
+	if len(pts) > maxSpendPoints {
+		pts = pts[len(pts)-maxSpendPoints:]
+	}
+	l.spend[r.Tenant] = pts
+}
+
+// maxSpendPoints bounds the per-tenant spend history. Roughly 45 days of
+// minutes, which covers a monthly period with room for a late reset.
+const maxSpendPoints = 65000
+
+// TenantTotals returns one tenant's snapshot.
+func (l *Ledger) TenantTotals(tenant string) Totals {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	t, ok := l.perTenant[tenant]
+	if !ok {
+		return Totals{Currency: l.prices.Currency(), Since: l.since.UTC().Format(time.RFC3339)}
+	}
+	out := *t
+	out.Currency = l.prices.Currency()
+	out.Since = l.since.UTC().Format(time.RFC3339)
+	return out
+}
+
+// Consumed reports what a tenant has spent at or after since.
+//
+// It answers for the running process only. Whatever this ledger had accounted
+// before a restart is gone, which is why a budget enforced against it is
+// best-effort — see LedgerStore's doc.
+func (l *Ledger) Consumed(tenant string, since time.Time) (prompt, completion int64) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	cutoff := since.UTC().Truncate(time.Minute)
+	for _, p := range l.spend[tenant] {
+		if p.minute.Before(cutoff) {
+			continue
+		}
+		prompt += p.prompt
+		completion += p.completion
+	}
+	return prompt, completion
 }
 
 // Totals returns a snapshot.

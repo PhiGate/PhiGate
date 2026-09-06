@@ -73,6 +73,14 @@ type Tenant struct {
 	RedactPacks     []string
 	DisableRules    []string
 	InternalDomains []string
+
+	// TokenBudget caps the tokens this tenant may spend in a budget period.
+	// Zero means unlimited.
+	//
+	// It bounds spend, where RateLimitPerMin bounds arrival rate. They are not
+	// substitutes: a hundred well-spaced requests carrying a megabyte each
+	// pass any rate limit and are what an unexpected invoice is made of.
+	TokenBudget int64
 }
 
 // Config holds every setting for the gateway.
@@ -108,6 +116,16 @@ type Config struct {
 	// Tenants holds per-tenant overrides, keyed by the tenant label APIKeys
 	// maps to. A label with no entry here uses the global settings.
 	Tenants map[string]Tenant
+
+	// BudgetPeriod is how often token budgets reset: "daily" or "monthly".
+	BudgetPeriod string
+	// BudgetTimezone is the zone period boundaries are computed in.
+	//
+	// It defaults to Asia/Tokyo rather than UTC because a budget period is a
+	// billing period, and a Japanese customer's month ends at midnight JST. A
+	// month that rolled over at 09:00 local time would put nine hours of every
+	// month-end in the wrong month.
+	BudgetTimezone string
 
 	// --- Redaction ---
 
@@ -210,6 +228,9 @@ func Defaults() Config {
 
 		Policy: policy.Default(),
 
+		BudgetPeriod:   "monthly",
+		BudgetTimezone: "Asia/Tokyo",
+
 		IngressScan:     true,
 		Enumeration:     sandbox.DefaultEnumerationThreshold(),
 		StreamMaxBuffer: sandbox.DefaultMaxBuffer,
@@ -308,6 +329,25 @@ func Validate(c *Config) error {
 		}
 	}
 
+	// Normalise before checking. A Config assembled in code rather than loaded
+	// from a file or the environment — which is how the tests and the
+	// enterprise binary build one — should not have to restate a default in
+	// order to be valid.
+	if c.BudgetPeriod == "" {
+		c.BudgetPeriod = "monthly"
+	}
+	if c.BudgetTimezone == "" {
+		c.BudgetTimezone = "Asia/Tokyo"
+	}
+	switch c.BudgetPeriod {
+	case "daily", "monthly":
+	default:
+		return fmt.Errorf("budget_period %q is not daily or monthly", c.BudgetPeriod)
+	}
+	if _, err := time.LoadLocation(c.BudgetTimezone); err != nil {
+		return fmt.Errorf("budget_timezone %q: %w", c.BudgetTimezone, err)
+	}
+
 	// A tenant may narrow what it can reach, never widen it. Otherwise the
 	// global policy stops being the ceiling an operator thinks it is.
 	for name, t := range c.Tenants {
@@ -322,6 +362,49 @@ func Validate(c *Config) error {
 		}
 	}
 	return nil
+}
+
+// BudgetFor returns a tenant's token budget, or zero when it has none.
+func (c *Config) BudgetFor(tenant string) int64 {
+	if t, ok := c.Tenants[tenant]; ok {
+		return t.TokenBudget
+	}
+	return 0
+}
+
+// AnyBudget reports whether any tenant is budgeted at all, so a deployment
+// with none pays for no bookkeeping.
+func (c *Config) AnyBudget() bool {
+	for _, t := range c.Tenants {
+		if t.TokenBudget > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// PeriodStart returns the beginning of the budget period containing now.
+//
+// The period is closed at its start and open at its end, so a request landing
+// exactly on the boundary belongs to the new period. That is the direction a
+// customer expects a monthly limit to reset in.
+func (c *Config) PeriodStart(now time.Time) time.Time {
+	zone := c.BudgetTimezone
+	if zone == "" {
+		zone = "Asia/Tokyo"
+	}
+	loc, err := time.LoadLocation(zone)
+	if err != nil {
+		// Validate rejects an unknown zone at startup, so this is unreachable
+		// from a configured gateway. Falling back to UTC rather than panicking
+		// keeps a budget bounded by *something* if it ever is reached.
+		loc = time.UTC
+	}
+	t := now.In(loc)
+	if c.BudgetPeriod == "daily" {
+		return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, loc)
+	}
+	return time.Date(t.Year(), t.Month(), 1, 0, 0, 0, 0, loc)
 }
 
 // PolicyFor returns the egress policy in force for a tenant.
@@ -489,6 +572,8 @@ func applyEnv(c *Config) error {
 			c.MaxBodyBytes = int64(n)
 		}
 	}
+	setStr(&c.BudgetPeriod, "PHIGATE_BUDGET_PERIOD")
+	setStr(&c.BudgetTimezone, "PHIGATE_BUDGET_TIMEZONE")
 	setInt(&c.RateLimitPerMin, "PHIGATE_RATE_LIMIT_PER_MIN")
 	setInt(&c.RateLimitBurst, "PHIGATE_RATE_LIMIT_BURST")
 	setInt(&c.Retries, "PHIGATE_UPSTREAM_RETRIES")

@@ -52,6 +52,8 @@ type Gateway struct {
 	// limiter rebuilt per call would hand every caller a full bucket. It reads
 	// its limits through now(), so a reload retunes the buckets it already has.
 	limiter *rateLimiter
+	// budget refuses a tenant that has spent its allowance for the period.
+	budget *budgetGuard
 
 	router   router.Router
 	ingress  *sandbox.IngressGuard
@@ -278,6 +280,7 @@ func NewWith(
 		guard:   guard,
 	})
 	g.limiter = newRateLimiter(g.now)
+	g.budget = newBudgetGuard(g)
 
 	g.metrics = g.registerMetrics()
 	return g, nil

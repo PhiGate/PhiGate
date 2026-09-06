@@ -87,7 +87,7 @@ persists or shares hydrated text serves one session's real values to another.
 | Seam | Status |
 |---|---|
 | `audit.Sink` — tamper-evident chain | **implemented**, `ee/audit/worm` |
-| `tokens.LedgerStore` — durable per-tenant quota | not yet |
+| `tokens.LedgerStore` — durable per-tenant quota | **implemented**, `ee/tokens/durable` |
 | `cache.Store` — semantic tier | not yet |
 | `redact.Detector` — dictionary/SLM-backed | not yet |
 
@@ -131,7 +131,48 @@ Three properties worth knowing before it is put in front of a customer:
   and cannot be removed sooner" is what a retention requirement actually says. A
   zero retention — the default — deletes nothing at all.
 
-Run the Community Edition instead if you do not need these: `cmd/phigate`.
+### The durable ledger
+
+`internal/tokens` says of the community ledger that it is "honest for a PoC and
+wrong for a production quota: a rolling update or a crash resets every tenant's
+consumption to zero, so a monthly hard limit stops being a limit." That is this
+package's entire reason to exist. A customer deploying weekly has twelve times
+the monthly allowance they were sold.
+
+```sh
+PHIGATE_EE_LEDGER_PATH=/var/lib/phigate/ledger.db phigate-ee
+```
+
+The budget itself is configured in CE, per tenant, and enforced by CE — the
+enterprise edition contains no request-path logic, so what it substitutes is the
+store the decision is made against:
+
+```json
+{ "budget_period": "monthly", "budget_timezone": "Asia/Tokyo",
+  "tenants": { "team-finance": { "token_budget": 5000000 } } }
+```
+
+Two properties to know before quoting it to a customer:
+
+- **A budget always overshoots by one request.** A request's token cost is not
+  known until it has finished, so the check is against what a tenant has already
+  spent. A streaming answer can overshoot by more. The bound is that the first
+  request after the allowance runs out is refused, not that the allowance is
+  never exceeded.
+- **A crash loses at most one flush interval of accounting.** bbolt fsyncs on
+  commit and a transaction per request would put a disk flush in the request
+  path, so spend is batched. Under-counting slightly after a crash is the right
+  direction to be wrong in; the alternative on offer is not "exact", it is
+  "zero".
+
+Periods reset in `budget_timezone`, which defaults to `Asia/Tokyo` rather than
+UTC because a budget period is a billing period and a Japanese customer's month
+ends at midnight JST — a boundary computed in UTC puts nine hours of every
+month-end in the wrong month.
+
+Run the Community Edition instead if you do not need these: `cmd/phigate`. CE
+enforces the same budgets against its in-memory ledger, which is honest for as
+long as the process lives and resets on a rolling update.
 
 ## Building
 

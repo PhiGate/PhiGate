@@ -71,6 +71,9 @@ type fileConfig struct {
 	Dashboard *bool      `json:"dashboard"`
 
 	Serving *fileServing `json:"serving"`
+
+	BudgetPeriod   *string `json:"budget_period"`
+	BudgetTimezone *string `json:"budget_timezone"`
 }
 
 type fileBackend struct {
@@ -143,6 +146,7 @@ type fileTenant struct {
 	RedactPacks     []string    `json:"redact_packs"`
 	DisableRules    []string    `json:"redact_disable"`
 	InternalDomains []string    `json:"internal_domains"`
+	TokenBudget     *int64      `json:"token_budget"`
 }
 
 func (f fileConfig) apply(c *Config, path string) error {
@@ -224,6 +228,8 @@ func (f fileConfig) apply(c *Config, path string) error {
 		assign(&c.CacheMax, f.Cache.Max)
 	}
 
+	assign(&c.BudgetPeriod, f.BudgetPeriod)
+	assign(&c.BudgetTimezone, f.BudgetTimezone)
 	assign(&c.PriceBookPath, f.PriceBook)
 	assign(&c.LocalCostPerM, f.LocalCostPerM)
 
@@ -269,6 +275,7 @@ func (f fileConfig) apply(c *Config, path string) error {
 			}
 			assign(&t.RateLimitPerMin, ft.RateLimitPerMin)
 			assign(&t.RateLimitBurst, ft.RateLimitBurst)
+			assign(&t.TokenBudget, ft.TokenBudget)
 			if ft.Policy != nil {
 				// A tenant's policy starts from the global one, so a block that
 				// names only cloud_max_sensitivity does not silently reset the

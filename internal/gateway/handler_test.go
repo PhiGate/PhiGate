@@ -1456,3 +1456,111 @@ func TestReloadUnderLoadIsRaceFree(t *testing.T) {
 	close(done)
 	wg.Wait()
 }
+
+// TestTokenBudgetRefusesAnExhaustedTenant. The budget bounds spend, where the
+// rate limit bounds arrival rate: a hundred well-spaced requests carrying a
+// megabyte each pass any rate limit and are what an unexpected invoice is made
+// of.
+func TestTokenBudgetRefusesAnExhaustedTenant(t *testing.T) {
+	cfg := testConfig()
+	cfg.AllowAnonymous = false
+	cfg.APIKeys = map[string]string{"k-small": "small", "k-free": "free"}
+	cfg.Tenants = map[string]config.Tenant{
+		"small": {TokenBudget: 30},
+	}
+	if err := config.Validate(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	g := newTestGateway(t, cfg, &fakeClient{name: "local", reply: "ok"}, &fakeClient{name: "cloud"})
+
+	// The first request is always allowed: nothing has been spent yet, and a
+	// request's cost is not known until it has finished.
+	first := postAs(t, g, "k-small", "disk full on 10.0.0.5, please investigate carefully")
+	if first.Code != 200 {
+		t.Fatalf("first request: %d", first.Code)
+	}
+	if first.Header().Get("X-PhiGate-Budget") != "30" {
+		t.Errorf("budget header = %q, want 30", first.Header().Get("X-PhiGate-Budget"))
+	}
+
+	// Keep going until the allowance is gone. It must run out.
+	var refused *httptest.ResponseRecorder
+	for range 20 {
+		rec := postAs(t, g, "k-small", "disk full on 10.0.0.5, please investigate carefully")
+		if rec.Code == 429 {
+			refused = rec
+			break
+		}
+	}
+	if refused == nil {
+		t.Fatal("a 30-token budget was never exhausted over 20 requests")
+	}
+	if got := refused.Header().Get("X-PhiGate-Budget-Remaining"); got != "0" {
+		t.Errorf("remaining header on refusal = %q, want 0", got)
+	}
+	if !strings.Contains(refused.Body.String(), "token_budget_exceeded") {
+		t.Errorf("refusal does not name the reason: %s", refused.Body.String())
+	}
+
+	// An unbudgeted tenant is untouched by its neighbour's exhaustion.
+	if rec := postAs(t, g, "k-free", "hello"); rec.Code != 200 {
+		t.Errorf("unbudgeted tenant refused with %d", rec.Code)
+	}
+}
+
+// TestBudgetIsNotEnforcedWithoutATenantLedger: a store that cannot answer means
+// "no limit known", never "limit reached". Failing closed would turn an
+// accounting outage into an outage.
+func TestBudgetIsNotEnforcedWithoutATenantLedger(t *testing.T) {
+	cfg := testConfig()
+	cfg.AllowAnonymous = false
+	cfg.APIKeys = map[string]string{"k": "t"}
+	cfg.Tenants = map[string]config.Tenant{"t": {TokenBudget: 1}}
+	if err := config.Validate(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	g := newTestGateway(t, cfg, &fakeClient{name: "local", reply: "ok"}, &fakeClient{name: "cloud"})
+	g.SetLedger(plainLedger{tokens.NewLedger(tokens.NewPriceBook())})
+
+	for i := range 5 {
+		if rec := postAs(t, g, "k", "disk full on 10.0.0.5"); rec.Code != 200 {
+			t.Fatalf("request %d refused with %d; a ledger that cannot report "+
+				"consumption must not be read as a exhausted budget", i, rec.Code)
+		}
+	}
+}
+
+// plainLedger implements only the required half of the seam.
+type plainLedger struct{ inner tokens.LedgerStore }
+
+func (p plainLedger) Record(r tokens.Record, b string) { p.inner.Record(r, b) }
+func (p plainLedger) Totals() tokens.Totals            { return p.inner.Totals() }
+
+// TestBudgetDoesNotBlockTheReportingEndpoints: a tenant that has exhausted its
+// allowance must still be able to find out why it is being refused.
+func TestBudgetDoesNotBlockTheReportingEndpoints(t *testing.T) {
+	cfg := testConfig()
+	cfg.AllowAnonymous = false
+	cfg.APIKeys = map[string]string{"k": "t"}
+	cfg.Tenants = map[string]config.Tenant{"t": {TokenBudget: 1}}
+	if err := config.Validate(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	g := newTestGateway(t, cfg, &fakeClient{name: "local", reply: "ok"}, &fakeClient{name: "cloud"})
+
+	postAs(t, g, "k", "spend the allowance on this request")
+	if rec := postAs(t, g, "k", "again"); rec.Code != 429 {
+		t.Fatalf("expected the budget to be exhausted, got %d", rec.Code)
+	}
+
+	for _, path := range []string{"/v1/phigate/stats", "/v1/phigate/rules"} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", path, nil)
+		req.Header.Set("Authorization", "Bearer k")
+		g.Routes().ServeHTTP(rec, req)
+		if rec.Code != 200 {
+			t.Errorf("%s returned %d for a tenant over budget; it must stay readable",
+				path, rec.Code)
+		}
+	}
+}

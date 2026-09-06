@@ -27,6 +27,24 @@ read.
   retention refuses to remove a segment younger than the configured period, with
   a zero retention deleting nothing.
 
+- **Per-tenant token budgets.** `token_budget` caps what a tenant may spend in a
+  budget period, where the rate limit caps how fast it may ask: a hundred
+  well-spaced requests carrying a megabyte each pass any rate limit and are what
+  an unexpected invoice is made of. Periods reset in `budget_timezone`, which
+  defaults to `Asia/Tokyo` — a billing month ends at midnight JST, and a
+  boundary computed in UTC puts nine hours of every month-end in the wrong
+  month. A budget always overshoots by one request, because a request's cost is
+  not known until it has finished; the bound is that the next one is refused.
+  CE's ledger now accounts per tenant, so budgets work there too — honestly for
+  as long as the process lives, and reset by a rolling update.
+
+- **Enterprise edition: a durable token ledger** (`ee/tokens/durable`), the
+  second seam. Per-tenant consumption survives a restart, which is what turns
+  CE's best-effort budget into a monthly limit that is actually monthly. Spend
+  is batched rather than fsynced per request, so a crash loses at most one flush
+  interval — under-counting slightly, where the alternative on offer is not
+  "exact" but "zero".
+
 - **A JSON configuration file**, named by `PHIGATE_CONFIG`. Precedence is
   defaults, then file, then environment: the file is the declared state you
   version-control, and the environment is where secrets live and where an

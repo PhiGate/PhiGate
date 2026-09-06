@@ -39,8 +39,14 @@ func (g *Gateway) Routes() http.Handler {
 	protect := func(h http.HandlerFunc) http.Handler {
 		return auth.Wrap(g.limiter.Wrap(h))
 	}
+	// The budget applies to what spends tokens, not to the endpoints that
+	// report on it: a tenant that has exhausted its allowance must still be
+	// able to read /v1/phigate/stats and find out why it is being refused.
+	spend := func(h http.HandlerFunc) http.Handler {
+		return auth.Wrap(g.limiter.Wrap(g.budget.Wrap(http.HandlerFunc(h))))
+	}
 
-	mux.Handle("/v1/chat/completions", protect(g.handleChatCompletions))
+	mux.Handle("/v1/chat/completions", spend(g.handleChatCompletions))
 	mux.Handle("/v1/models", protect(g.handleModels))
 	mux.Handle("/v1/phigate/stats", protect(g.handleStats))
 	mux.Handle("/v1/phigate/rules", protect(g.handleRules))

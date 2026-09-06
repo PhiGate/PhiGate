@@ -32,6 +32,7 @@ import (
 	"os"
 
 	"github.com/phigate/phigate/ee/audit/worm"
+	"github.com/phigate/phigate/ee/tokens/durable"
 	"github.com/phigate/phigate/internal/config"
 	"github.com/phigate/phigate/internal/gateway"
 	"github.com/phigate/phigate/internal/llm"
@@ -111,10 +112,28 @@ func main() {
 	defer func() { _ = sink.Close() }()
 	g.SetAudit(sink)
 
+	// The accounting seam: per-tenant consumption that survives a rolling
+	// update, which is what turns CE's best-effort budget into a real one. It
+	// is optional — a deployment with no budgets does not need it — and the
+	// community ledger stays underneath it for the process-wide FinOps figures.
+	if path := os.Getenv("PHIGATE_EE_LEDGER_PATH"); path != "" {
+		ledger, err := durable.Open(durable.Options{
+			Path:        path,
+			Inner:       tokens.NewLedger(prices),
+			PeriodStart: cfg.PeriodStart,
+		})
+		if err != nil {
+			log.Fatalf("phigate-ee: %v", err)
+		}
+		defer func() { _ = ledger.Close() }()
+		g.SetLedger(ledger)
+		log.Printf("  token ledger   : %s (%s periods, %s)",
+			path, cfg.BudgetPeriod, cfg.BudgetTimezone)
+	}
+
 	// Still to land, each substituting a seam CE already declares:
 	//
 	//	g.SetCache(semantic.New(...))   // embedded HNSW tier, via cache.ProbeStore
-	//	g.SetLedger(durable.New(...))   // survives a rolling update, per tenant
 	//	detector                        // dictionary/SLM-backed, composed with CE's
 
 	srv := gateway.NewServer(cfg, g)

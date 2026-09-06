@@ -19,6 +19,8 @@ require (
 	github.com/tree-sitter/go-tree-sitter v0.25.0 // indirect
 	github.com/tree-sitter/tree-sitter-go v0.25.0 // indirect
 	github.com/tree-sitter/tree-sitter-python v0.25.0 // indirect
+	go.etcd.io/bbolt v1.5.0 // indirect
+	golang.org/x/sys v0.45.0 // indirect
 )
 
 // The two modules are developed and released together, so EE always builds

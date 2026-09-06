@@ -112,12 +112,32 @@ func TestLedgerSeamCarriesTheTenant(t *testing.T) {
 	}
 }
 
-// TestCommunityLedgerIsNotATenantLedger: CE's process-wide totals must not
-// claim to answer per-tenant questions, or a budget check would silently
-// answer for the whole deployment.
-func TestCommunityLedgerIsNotATenantLedger(t *testing.T) {
-	var l tokens.LedgerStore = tokens.NewLedger(tokens.NewPriceBook())
-	if _, ok := l.(tokens.TenantLedger); ok {
-		t.Fatal("the in-memory ledger claims to be a TenantLedger; its totals are process-wide")
+// TestCommunityLedgerAccountsPerTenant: CE implements TenantLedger because it
+// genuinely attributes per tenant. What it cannot do is survive a restart,
+// which is the enterprise edition's job and a different axis. A budget check
+// that silently answered for the whole deployment would be the failure worth
+// guarding against, so this asserts the attribution is real.
+func TestCommunityLedgerAccountsPerTenant(t *testing.T) {
+	l := tokens.NewLedger(tokens.NewPriceBook())
+	var store tokens.LedgerStore = l
+	tl, ok := store.(tokens.TenantLedger)
+	if !ok {
+		t.Fatal("the in-memory ledger no longer implements TenantLedger")
+	}
+
+	l.Record(tokens.Record{Tenant: "a", Route: tokens.RouteCloud, PromptTokens: 100}, "gpt-4o")
+	l.Record(tokens.Record{Tenant: "b", Route: tokens.RouteCloud, PromptTokens: 7}, "gpt-4o")
+
+	if got := tl.TenantTotals("a").PromptTokens; got != 100 {
+		t.Errorf("tenant a prompt tokens = %d, want 100", got)
+	}
+	if got := tl.TenantTotals("b").PromptTokens; got != 7 {
+		t.Errorf("tenant b prompt tokens = %d, want 7 — one tenant is seeing another's spend", got)
+	}
+	if p, _ := tl.Consumed("a", time.Now().Add(-time.Hour)); p != 100 {
+		t.Errorf("Consumed(a) = %d, want 100", p)
+	}
+	if p, _ := tl.Consumed("nobody", time.Now().Add(-time.Hour)); p != 0 {
+		t.Errorf("Consumed for an unknown tenant = %d, want 0", p)
 	}
 }
