@@ -1,0 +1,24 @@
+# Line endings are LF, in the repository and in every working tree.
+#
+# Not a style preference. This repository is developed on Windows against a WSL
+# mount, where an editor saving a file rewrites every line ending and turns a
+# one-line edit into a diff touching the whole file — which is how a real change
+# gets lost in review. Everything committed today is already LF, so this is a
+# guard rather than a migration.
+*               text=auto eol=lf
+
+# Shell scripts and the git hook are executed, not read. A CR at the end of a
+# shebang line makes the interpreter path "/bin/sh\r", which does not exist, and
+# the error names a file that plainly does.
+*.sh            text eol=lf
+.githooks/*     text eol=lf
+
+# Go fuzz corpora are byte-exact reproducers: each file is the input that
+# triggered a crash, written by the toolchain and re-read by it. They are text,
+# and marking them so keeps a Windows checkout from introducing a byte the
+# scanner under test never saw.
+internal/sandbox/testdata/fuzz/** text eol=lf
+
+# The leak corpus is the evidence behind the redaction guarantee. Its detection
+# offsets are byte offsets.
+internal/redact/testdata/**       text eol=lf
