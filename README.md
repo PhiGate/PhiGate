@@ -28,6 +28,7 @@ they stop being true. Run them yourself:
 | The guard does **not** block ordinary prose | same | `-run TestGuardDoesNotBlockProse` |
 | A streamed answer is guarded exactly as a non-streamed one | [`internal/sandbox`](internal/sandbox/) | `go test ./internal/sandbox/ -run TestStreamingAgrees` |
 | The cache never serves one session's values to another | [`internal/cache`](internal/cache/) | `go test ./internal/gateway/ -run Cache` |
+| …and never answers one question with another's answer | shape keying is exact matching | `go test ./internal/gateway/ -run Shape` |
 | Audit records contain no raw values | [`internal/audit`](internal/audit/) | the `Event` type has no field that can hold one |
 
 Then measure it on **your** data:
@@ -141,20 +142,46 @@ confined to local does not fall back to the cloud. It fails.
 
 ## The three ideas worth knowing
 
-### 1. The template cache is the real cost lever
+### 1. The template cache is the real cost lever — and it is keyed on *shape*
 
 AIOps traffic is extraordinarily repetitive: the same disk-full alert thousands
 of times a day, differing only in the IP, timestamp and request id. A normal
 cache never hits, because those values make every prompt unique.
 
 PhiGate has already replaced exactly those values with placeholders before the
-cache is consulted. Ten thousand distinct log lines collapse to one template, so
-occurrences 2 through 10,000 cost **zero upstream tokens**. Compression makes the
-cache work; the cache is what makes compression pay for itself.
+cache is consulted. But placeholders alone are not enough, and measuring it is
+what showed why. The session dictionary numbers a value the first time it is
+*ever* seen — which is what makes hydration work, since `<V7>` has to mean one
+particular host for a whole conversation — so the same log line arriving an hour
+apart compresses to `<V7> failed` and `<V931> failed`. Keyed on that text, they
+were different keys, and the cache missed on two payloads that are the same
+payload.
 
-The cache stores answers **before** hydration and keys them on a hash of the
-compressed prompt, so it holds no customer data at all and is safe to share
-across tenants — each session hydrates the shared answer with its own dictionary.
+Measure it yourself, on the same corpus the table above uses:
+
+```bash
+./bin/phigate-eval cache -dir eval/corpus
+```
+
+| Keyed on | Hit rate over 16,000 lines |
+|---|---:|
+| the compressed text | **4.5%** |
+| the compressed **shape** (placeholders renumbered per payload) | **50.5%** |
+
+So the key is built on the shape. This is still *exact* matching — two payloads
+share a key only if they are identical once their placeholders are renumbered —
+so the cache still cannot answer one question with another's answer. Entries are
+stored in canonical form and translated back into the requesting payload's own
+numbering before hydration.
+
+The remaining 44.9% are payloads whose shape occurs exactly once in the corpus.
+That is the entire headroom a semantic tier could ever compete for, and it could
+only convert them by matching a payload to a *different* one — which is where a
+wrong answer comes from, and which the exact-match cache cannot do at all.
+
+The cache stores answers **before** hydration and keys them on a hash, so it
+holds no customer data at all and is safe to share across tenants — each session
+hydrates the shared answer with its own dictionary.
 
 ### 2. Classification is a control, not a label
 

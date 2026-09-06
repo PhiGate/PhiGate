@@ -98,8 +98,8 @@ func (g *Gateway) streamResponse(w http.ResponseWriter, r *http.Request, p *requ
 
 	if err == nil && !scanner.Blocked() && !toolsBlocked && (masked.Len() > 0 || len(maskedCalls) > 0) {
 		g.cache.Put(p.cacheKey, cache.Entry{
-			Content:   masked.String(),
-			ToolCalls: maskedCalls,
+			Content:   p.canonicalise(masked.String()),
+			ToolCalls: p.canonicaliseCalls(maskedCalls),
 			Model:     model,
 			Route:     p.routed.Target.String(),
 		})
@@ -215,12 +215,12 @@ func (g *Gateway) streamCached(w http.ResponseWriter, flusher http.Flusher, p *r
 	meta := g.buildMeta(p, "cache", "", "")
 	sw := newSSEWriter(w, flusher, "chatcmpl-"+p.sess.ID, req.Model+" (phigate:cache)", meta)
 	scanner := g.newScanner(p, sw)
-	_ = scanner.Write(e.Content)
+	_ = scanner.Write(cache.Restore(e.Content, p.restore))
 	_ = scanner.Close()
 	// A cached tool-call answer is replayed through the same checks as a live
 	// one: the entry is pre-hydration, so this session's dictionary is what
 	// resolves it, and this session's guard is what vets the result.
-	g.emitToolCalls(p, sw, scanner, e.ToolCalls)
+	g.emitToolCalls(p, sw, scanner, restoreCalls(e.ToolCalls, p.restore))
 	sw.done()
 
 	g.finish(p, tokens.Record{

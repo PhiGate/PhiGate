@@ -9,11 +9,15 @@
 // raw prompt never hits, because those varying values make every request unique.
 //
 // PhiGate has already replaced exactly those values with placeholders by the
-// time the cache is consulted. Ten thousand distinct log lines collapse to one
-// compressed template, so the second through ten-thousandth occurrence is a
-// cache hit and costs zero upstream tokens. The compression pipeline is what
-// makes the cache work, and the cache is what makes the compression pipeline
-// pay for itself.
+// time the cache is consulted, so ten thousand distinct log lines collapse to
+// one compressed template and occurrences two through ten thousand cost zero
+// upstream tokens. The compression pipeline is what makes the cache work, and
+// the cache is what makes the compression pipeline pay for itself.
+//
+// That collapse needs one more step than it looks, and the key is built on the
+// payload's *shape* rather than on its compressed text. See Shape for the
+// measurement that showed why: 4.5% against 50.5% on the corpus the README
+// benchmarks with.
 //
 // # The security property that makes this safe
 //
@@ -30,6 +34,7 @@ import (
 	"container/list"
 	"crypto/sha256"
 	"encoding/hex"
+	"regexp"
 	"sort"
 	"strconv"
 	"sync"
@@ -168,7 +173,76 @@ func New(ttl time.Duration, max int) *Cache {
 	return c
 }
 
+// placeholderRe matches the tokens the masker and the ref dictionary emit.
+var placeholderRe = regexp.MustCompile(`<V\d+>|#REF\d+`)
+
+// Shape renumbers a payload's placeholders in order of first appearance, and
+// returns the mapping from the canonical token back to the original.
+//
+// # Why the cache cannot be keyed on the compressed text
+//
+// The session dictionary numbers a value the first time it is *ever* seen, and
+// that numbering is what makes hydration work: <V7> has to mean one particular
+// host for the whole conversation. The consequence is that the same log line,
+// arriving an hour apart in a busy session, compresses to "<V7> failed" and
+// "<V931> failed". Those are different strings, so they were different keys,
+// and the cache missed on two payloads that are the same payload.
+//
+// Measured on the eight LogHub corpora the README benchmarks with, keying on
+// the text gives a 4.5% hit rate; keying on the shape gives 50.5%. That is the
+// difference between a cost lever and a rounding error, and it was invisible
+// because nothing measured it.
+//
+// This is still exact matching. Two payloads share a key only if they are
+// identical once their placeholders are renumbered, so the cache still cannot
+// serve an answer to a different question — which is the property a semantic
+// tier would trade away.
+func Shape(texts []string) (canonical []string, toOriginal map[string]string) {
+	seen := map[string]string{}      // original token -> canonical token
+	toOriginal = map[string]string{} // canonical token -> original token
+	canonical = make([]string, len(texts))
+
+	for i, t := range texts {
+		canonical[i] = placeholderRe.ReplaceAllStringFunc(t, func(m string) string {
+			if c, ok := seen[m]; ok {
+				return c
+			}
+			var c string
+			if m[0] == '#' {
+				c = "#REF" + strconv.Itoa(len(seen)+1)
+			} else {
+				c = "<V" + strconv.Itoa(len(seen)+1) + ">"
+			}
+			seen[m] = c
+			toOriginal[c] = m
+			return c
+		})
+	}
+	return canonical, toOriginal
+}
+
+// Restore maps a canonical answer back into one payload's own numbering.
+//
+// An entry is stored in canonical form, so a hit has to be translated into the
+// tokens the *requesting* session will hydrate. A canonical token with no entry
+// in the mapping is left alone: the model can emit a placeholder that was not
+// in its prompt, and inventing an original for it would hydrate a value the
+// answer never referred to.
+func Restore(text string, toOriginal map[string]string) string {
+	if len(toOriginal) == 0 {
+		return text
+	}
+	return placeholderRe.ReplaceAllStringFunc(text, func(m string) string {
+		if orig, ok := toOriginal[m]; ok {
+			return orig
+		}
+		return m
+	})
+}
+
 // Key derives the cache key from everything that can change the answer.
+//
+// Callers pass the *canonical* compressed messages — see Shape.
 //
 // The compressed prompt is hashed rather than stored, so the cache holds no
 // prompt text at all — not even masked text — which keeps a memory dump of the

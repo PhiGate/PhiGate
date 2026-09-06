@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -1743,5 +1744,114 @@ func TestEmbeddingsPassTokenInputThrough(t *testing.T) {
 	}
 	if !strings.Contains(string(out), "1212") {
 		t.Errorf("token input was lost: %s", out)
+	}
+}
+
+// TestCacheHitsAcrossDictionaryNumbering is the defect the corpus measurement
+// found. The session dictionary numbers a value the first time it is ever seen,
+// so the same payload twice in one busy session compressed to different text
+// and missed a key built on that text. Measured on the eight LogHub corpora the
+// README benchmarks with: 4.5% keyed on the text, 50.5% keyed on the shape.
+func TestCacheHitsAcrossDictionaryNumbering(t *testing.T) {
+	cfg := testConfig()
+	cfg.CacheMax = 100
+	cfg.CacheEnabled = true
+	local := &fakeClient{name: "local", reply: "restart <V1>"}
+	g := newTestGateway(t, cfg, local, &fakeClient{name: "cloud"})
+
+	post := func(content string) (*httptest.ResponseRecorder, types.ChatCompletionResponse) {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("POST", "/v1/chat/completions",
+			strings.NewReader(`{"model":"gpt-4o","messages":[{"role":"user","content":`+quote(content)+`}]}`))
+		// One long-lived session, which is what makes the numbering diverge.
+		req.Header.Set("X-PhiGate-Session", "conv-1")
+		g.Routes().ServeHTTP(rec, req)
+		var resp types.ChatCompletionResponse
+		_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+		return rec, resp
+	}
+
+	// The first payload populates the cache under <V1>.
+	post("disk full on 10.0.0.5")
+	// Unrelated traffic advances the dictionary, so the next identical-shaped
+	// payload gets a much higher placeholder number.
+	for i := range 5 {
+		post("unrelated event on 10.1.1." + strconv.Itoa(i))
+	}
+
+	rec, resp := post("disk full on 10.9.9.9")
+	if rec.Header().Get("X-PhiGate-Cache") != "hit" {
+		t.Fatalf("a payload of the same shape missed the cache; the key is still "+
+			"built on the session's numbering (headers %v)", rec.Header())
+	}
+	// And the answer must be restored into *this* payload's value, not the one
+	// that populated the entry.
+	if got := resp.Choices[0].Message.Content; got != "restart 10.9.9.9" {
+		t.Fatalf("content = %q, want \"restart 10.9.9.9\" — the canonical answer "+
+			"was not mapped back into this payload's numbering", got)
+	}
+}
+
+// TestShapeKeyingDoesNotMergeDifferentQuestions. Keying on shape is still exact
+// matching: two payloads share a key only if they are identical once their
+// placeholders are renumbered. This is the property a semantic tier would
+// trade away, so it needs a test.
+func TestShapeKeyingDoesNotMergeDifferentQuestions(t *testing.T) {
+	cfg := testConfig()
+	cfg.CacheMax = 100
+	cfg.CacheEnabled = true
+	g := newTestGateway(t, cfg, &fakeClient{name: "local", reply: "ok"}, &fakeClient{name: "cloud"})
+
+	postAsAnon(t, g, "disk full on 10.0.0.5")
+	rec := postAsAnon(t, g, "memory exhausted on 10.0.0.5")
+	if rec.Header().Get("X-PhiGate-Cache") == "hit" {
+		t.Fatal("two different questions shared a cache entry")
+	}
+}
+
+// TestShapeKeyingKeepsCrossSessionIsolation: the entry is stored in canonical
+// form and restored per payload, so the cross-session guarantee has to survive
+// the extra translation.
+func TestShapeKeyingKeepsCrossSessionIsolation(t *testing.T) {
+	cfg := testConfig()
+	cfg.CacheMax = 100
+	cfg.CacheEnabled = true
+	g := newTestGateway(t, cfg, &fakeClient{name: "local", reply: "check <V1> now"}, &fakeClient{name: "cloud"})
+
+	_, first := postRaw(t, g,
+		`{"model":"gpt-4o","messages":[{"role":"user","content":"disk full on 10.0.0.5"}]}`)
+	rec, second := postRaw(t, g,
+		`{"model":"gpt-4o","messages":[{"role":"user","content":"disk full on 10.9.9.9"}]}`)
+
+	if rec.Header().Get("X-PhiGate-Cache") != "hit" {
+		t.Fatal("the second request did not hit the cache")
+	}
+	if got := first.Choices[0].Message.Content; got != "check 10.0.0.5 now" {
+		t.Errorf("first answer = %q", got)
+	}
+	if got := second.Choices[0].Message.Content; got != "check 10.9.9.9 now" {
+		t.Fatalf("CACHE LEAK: second answer = %q, want its own host", got)
+	}
+}
+
+// TestAnswerWithAnUnknownPlaceholderIsLeftAlone: a model can emit a placeholder
+// that was not in its prompt, and inventing an original for it would hydrate a
+// value the answer never referred to.
+func TestAnswerWithAnUnknownPlaceholderIsLeftAlone(t *testing.T) {
+	cfg := testConfig()
+	cfg.CacheMax = 100
+	cfg.CacheEnabled = true
+	g := newTestGateway(t, cfg, &fakeClient{name: "local", reply: "see <V1> and <V99>"}, &fakeClient{name: "cloud"})
+
+	postAsAnon(t, g, "disk full on 10.0.0.5")
+	_, resp := postRaw(t, g,
+		`{"model":"gpt-4o","messages":[{"role":"user","content":"disk full on 10.9.9.9"}]}`)
+
+	got := resp.Choices[0].Message.Content
+	if !strings.Contains(got, "10.9.9.9") {
+		t.Errorf("content = %q, want the known placeholder restored", got)
+	}
+	if !strings.Contains(got, "<V99>") {
+		t.Errorf("content = %q, want the unknown placeholder left as it was", got)
 	}
 }

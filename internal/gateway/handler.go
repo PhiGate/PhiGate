@@ -45,8 +45,12 @@ type requestPlan struct {
 	promptEst int
 	cacheKey  string
 	probe     cache.Probe
-	event     audit.Event
-	start     time.Time
+	// restore maps a canonical placeholder back to this payload's own token.
+	// Entries are stored canonically, so a hit has to be translated before it
+	// can be hydrated with this session's dictionary.
+	restore map[string]string
+	event   audit.Event
+	start   time.Time
 }
 
 // handleChatCompletions implements POST /v1/chat/completions:
@@ -197,11 +201,17 @@ func (g *Gateway) plan(st *runtimeState, r *http.Request, req *types.ChatComplet
 	if len(p.tools) > 0 {
 		keyParts = append(append([]string(nil), compressedTexts...), string(p.tools))
 	}
-	p.cacheKey = cache.Key(g.modelFor(routed.Target), keyParts, req.Temperature, req.MaxTokens)
+	// Keyed on the payload's *shape*, not on its text: the session dictionary
+	// numbers a value the first time it is ever seen, so the same payload twice
+	// in one busy session produces two different strings. See cache.Shape.
+	canonical, restore := cache.Shape(keyParts)
+	p.restore = restore
+
+	p.cacheKey = cache.Key(g.modelFor(routed.Target), canonical, req.Temperature, req.MaxTokens)
 	p.probe = cache.Probe{
 		Key:         p.cacheKey,
 		Model:       g.modelFor(routed.Target),
-		Texts:       keyParts,
+		Texts:       canonical,
 		Temperature: req.Temperature,
 		MaxTokens:   req.MaxTokens,
 	}
@@ -301,8 +311,8 @@ func (g *Gateway) blockingResponse(w http.ResponseWriter, r *http.Request, p *re
 	// Cache the masked answer, never the hydrated one.
 	if len(resp.Choices) > 0 {
 		g.cache.Put(p.cacheKey, cache.Entry{
-			Content:          resp.Choices[0].Message.Content,
-			ToolCalls:        resp.Choices[0].Message.ToolCalls,
+			Content:          p.canonicalise(resp.Choices[0].Message.Content),
+			ToolCalls:        p.canonicaliseCalls(resp.Choices[0].Message.ToolCalls),
 			Model:            model,
 			Route:            p.routed.Target.String(),
 			PromptTokens:     resp.Usage.PromptTokens,
@@ -347,8 +357,12 @@ func (g *Gateway) serveCached(w http.ResponseWriter, p *requestPlan, req *types.
 		Object:  "chat.completion",
 		Created: time.Now().Unix(),
 		Choices: []types.Choice{{
-			Index:        0,
-			Message:      types.Message{Role: "assistant", Content: e.Content, ToolCalls: e.ToolCalls},
+			Index: 0,
+			Message: types.Message{
+				Role:      "assistant",
+				Content:   cache.Restore(e.Content, p.restore),
+				ToolCalls: restoreCalls(e.ToolCalls, p.restore),
+			},
 			FinishReason: finishReasonFor(e),
 		}},
 	}
@@ -412,6 +426,54 @@ func jsonStrings(v any) []string {
 		return out
 	}
 	return nil
+}
+
+// canonicalise rewrites an answer into the shape the cache stores.
+//
+// An entry is keyed on the payload's shape, so the answer it holds has to be in
+// the same numbering or a hit would restore tokens that mean nothing to it.
+func (p *requestPlan) canonicalise(text string) string {
+	if len(p.restore) == 0 {
+		return text
+	}
+	inverse := make(map[string]string, len(p.restore))
+	for canonical, original := range p.restore {
+		inverse[original] = canonical
+	}
+	return cache.Restore(text, inverse)
+}
+
+func (p *requestPlan) canonicaliseCalls(calls []types.ToolCall) []types.ToolCall {
+	if len(calls) == 0 || len(p.restore) == 0 {
+		return calls
+	}
+	out := make([]types.ToolCall, len(calls))
+	for i, c := range calls {
+		out[i] = c
+		if c.Function != nil {
+			fn := *c.Function
+			fn.Arguments = p.canonicalise(fn.Arguments)
+			out[i].Function = &fn
+		}
+	}
+	return out
+}
+
+// restoreCalls maps a cached answer's tool calls into this payload's numbering.
+func restoreCalls(calls []types.ToolCall, toOriginal map[string]string) []types.ToolCall {
+	if len(calls) == 0 {
+		return calls
+	}
+	out := make([]types.ToolCall, len(calls))
+	for i, c := range calls {
+		out[i] = c
+		if c.Function != nil {
+			fn := *c.Function
+			fn.Arguments = cache.Restore(fn.Arguments, toOriginal)
+			out[i].Function = &fn
+		}
+	}
+	return out
 }
 
 // finishReasonFor reports the finish reason a replayed cache entry should

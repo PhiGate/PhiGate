@@ -27,7 +27,9 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -47,6 +49,8 @@ func main() {
 		err = runBench(os.Args[2:])
 	case "eval":
 		err = runEval(os.Args[2:])
+	case "cache":
+		err = runCache(os.Args[2:])
 	case "leak":
 		err = runLeak(os.Args[2:])
 	default:
@@ -64,12 +68,189 @@ func usage() {
 
   bench  -dir <path>            token reduction per pipeline stage over a corpus
   eval   -cases <file.json>     answer quality: raw cloud vs through PhiGate, judged
+  cache  -dir <path>            template cache hit rate, and the headroom a
+                                semantic tier would have to beat
   leak   -dir <path>            assert no secret in a corpus survives redaction
 
 Corpora: point -dir at a directory of .log/.txt files. Public AIOps datasets
 (LogHub: HDFS, BGL, Spark, Thunderbird) work directly and make the numbers
 independently reproducible.
 `)
+}
+
+// ---------------------------------------------------------------- cache
+
+// cacheResult is one corpus file's cache behaviour.
+type cacheResult struct {
+	File string `json:"file"`
+	// Lines is how many payloads were put through the pipeline.
+	Lines int `json:"lines"`
+	// Distinct is how many distinct compressed templates they produced, which
+	// is how many upstream calls a perfect exact-match cache would make.
+	Distinct int `json:"distinct_templates"`
+	// HitRate is the share of payloads served without an upstream call.
+	HitRate float64 `json:"hit_rate_percent"`
+	// Singletons is how many templates occurred exactly once. This is the
+	// headroom: they are the only payloads a semantic tier could turn into
+	// hits, because everything else is already a hit.
+	Singletons int `json:"singleton_templates"`
+	// Headroom is the share of payloads a semantic tier could improve on, at
+	// absolute best — if it matched every singleton to something, correctly.
+	Headroom float64 `json:"headroom_percent"`
+	// ShapeTemplates and ShapeHitRate are the same figures after canonically
+	// renumbering placeholders within each payload, so two payloads that
+	// differ only in *which* values they carry share a key.
+	ShapeTemplates int     `json:"shape_templates"`
+	ShapeHitRate   float64 `json:"shape_hit_rate_percent"`
+}
+
+// placeholderRe matches the tokens the masker and refdict emit.
+var placeholderRe = regexp.MustCompile(`<V(\d+)>|#REF(\d+)`)
+
+// canonicalShape renumbers placeholders in order of first appearance.
+//
+// The session dictionary numbers a value the first time it is *ever* seen, so
+// the same log line an hour apart compresses to "<V7> failed" and "<V931>
+// failed" and misses a cache keyed on the text. Renumbering per payload makes
+// the key describe the payload's shape rather than the history of the session
+// it arrived in.
+func canonicalShape(s string) string {
+	seen := map[string]int{}
+	return placeholderRe.ReplaceAllStringFunc(s, func(m string) string {
+		n, ok := seen[m]
+		if !ok {
+			n = len(seen) + 1
+			seen[m] = n
+		}
+		if m[0] == '#' {
+			return "#REF" + strconv.Itoa(n)
+		}
+		return "<V" + strconv.Itoa(n) + ">"
+	})
+}
+
+// runCache measures what the exact-match template cache already achieves.
+//
+// It exists to answer one question before any work is done on a semantic tier:
+// how much is left for one to win? The template cache hits because masking has
+// already replaced the values that made every log line unique, so ten thousand
+// lines collapse to one template. If that collapse is already near-total, a
+// semantic tier is being asked to improve on a number that has no room in it —
+// and it would be paying for the improvement with an embedding call per miss
+// and a class of wrong answer the exact-match cache cannot produce.
+func runCache(args []string) error {
+	fs := flag.NewFlagSet("cache", flag.ExitOnError)
+	dir := fs.String("dir", "", "directory of log/code files to measure")
+	jsonOut := fs.Bool("json", false, "emit JSON instead of a table")
+	_ = fs.Parse(args)
+
+	if *dir == "" {
+		return fmt.Errorf("-dir is required")
+	}
+	files, err := corpusFiles(*dir)
+	if err != nil {
+		return err
+	}
+	if len(files) == 0 {
+		return fmt.Errorf("no corpus files found under %s", *dir)
+	}
+
+	engine, err := redact.NewEngine(redact.Options{
+		InternalDomains: []string{"internal", "corp", "local", "lan"},
+	})
+	if err != nil {
+		return err
+	}
+
+	var rows []cacheResult
+	var totLines, totDistinct, totSingles, totShapes int
+
+	for _, f := range files {
+		raw, err := os.ReadFile(f)
+		if err != nil {
+			return err
+		}
+		pipeline := compressor.NewPipelineWith(
+			compressor.NewMaskerWith(engine),
+			compressor.NewDrain(),
+			compressor.NewRefDict(),
+		)
+		// One session for the file, as a single conversation would have, so
+		// the dictionary is stable and identical values collapse.
+		sess := compressor.NewSession()
+
+		counts := map[string]int{}
+		shapes := map[string]int{}
+		lines := 0
+		for _, line := range strings.Split(string(raw), "\n") {
+			if strings.TrimSpace(line) == "" {
+				continue
+			}
+			out, err := pipeline.Compress(line, sess)
+			if err != nil {
+				return err
+			}
+			counts[out]++
+			shapes[canonicalShape(out)]++
+			lines++
+		}
+		if lines == 0 {
+			continue
+		}
+		// Singletons are counted over shapes, not over raw templates: a
+		// payload that is a singleton only because its placeholders were
+		// numbered differently is not headroom for anything, it is a key that
+		// should have matched.
+		singles := 0
+		for _, n := range shapes {
+			if n == 1 {
+				singles++
+			}
+		}
+		rows = append(rows, cacheResult{
+			File:           filepath.Base(f),
+			Lines:          lines,
+			Distinct:       len(counts),
+			HitRate:        100 * float64(lines-len(counts)) / float64(lines),
+			Singletons:     singles,
+			Headroom:       100 * float64(singles) / float64(lines),
+			ShapeTemplates: len(shapes),
+			ShapeHitRate:   100 * float64(lines-len(shapes)) / float64(lines),
+		})
+		totLines += lines
+		totDistinct += len(counts)
+		totSingles += singles
+		totShapes += len(shapes)
+	}
+
+	if *jsonOut {
+		return json.NewEncoder(os.Stdout).Encode(rows)
+	}
+
+	fmt.Printf("%-22s %8s %10s %9s %11s %10s\n",
+		"corpus", "lines", "templates", "hit rate", "by shape", "headroom")
+	for _, r := range rows {
+		fmt.Printf("%-22s %8d %10d %8.1f%% %10.1f%% %9.1f%%\n",
+			r.File, r.Lines, r.Distinct, r.HitRate, r.ShapeHitRate, r.Headroom)
+	}
+	if totLines > 0 {
+		fmt.Printf("%-22s %8d %10d %8.1f%% %10.1f%% %9.1f%%\n", "ALL",
+			totLines, totDistinct,
+			100*float64(totLines-totDistinct)/float64(totLines),
+			100*float64(totLines-totShapes)/float64(totLines),
+			100*float64(totSingles)/float64(totLines))
+	}
+	fmt.Print(`
+hit rate = payloads served with no upstream call, keyed on the compressed text.
+by shape = the same, keyed on the compressed text with placeholders renumbered
+           per payload. The session dictionary numbers a value the first time it
+           is ever seen, so two identical log lines an hour apart compress to
+           "<V7> failed" and "<V931> failed" and miss a key built on the text.
+headroom = payloads whose template occurred exactly once even by shape. This is
+           all a semantic tier could ever convert, and only by matching them to
+           a *different* template, which is where a wrong answer comes from.
+`)
+	return nil
 }
 
 // ---------------------------------------------------------------- bench

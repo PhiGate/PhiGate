@@ -104,6 +104,28 @@ read.
   `service.sessionAffinity` is now available and values.yaml documents which
   state is per-process and why.
 
+### Fixed — the cache
+
+- **The template cache was keyed on the compressed text, and mostly missed.**
+  The session dictionary numbers a value the first time it is ever seen — which
+  is what makes hydration work, since `<V7>` has to mean one particular host for
+  a whole conversation — so the same log line arriving twice in a busy session
+  compressed to `<V7> failed` and `<V931> failed` and produced two different
+  keys. Measured on the eight LogHub corpora the README benchmarks with, the
+  cache called "the real cost lever" achieved a **4.5%** hit rate. Keyed on the
+  payload's *shape*, with placeholders renumbered per payload, it achieves
+  **50.5%**.
+
+  This is still exact matching: two payloads share a key only if they are
+  identical once renumbered, so the cache still cannot answer one question with
+  another's answer. Entries are stored canonically and translated back into the
+  requesting payload's numbering before hydration; a placeholder the model
+  invented, with no counterpart in the prompt, is left as it is rather than
+  mapped to a value the answer never referred to.
+
+  `phigate-eval cache -dir <path>` is the new subcommand that measures this, and
+  the README's description of the cache has been corrected.
+
 ### Fixed — routing
 
 - **The router was quietly wrong for Japanese traffic**, in two ways that
