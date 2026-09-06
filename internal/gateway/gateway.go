@@ -20,13 +20,22 @@ import (
 
 // Gateway holds the long-lived components shared across requests.
 type Gateway struct {
-	cfg      config.Config
-	pipeline *compressor.Pipeline
-	masker   *compressor.Masker
+	cfg config.Config
+
+	// global is what applies to a tenant with no overrides, and what the
+	// operator-facing endpoints describe. tenants holds one view per tenant
+	// that narrows it.
+	global  tenantView
+	tenants map[string]tenantView
+
+	// limiter holds live token buckets, so it belongs to the gateway rather
+	// than to the route table: Routes may be called more than once, and a
+	// limiter rebuilt per call would hand every caller a full bucket.
+	limiter *rateLimiter
+
 	router   router.Router
 	guard    *sandbox.RuleGuard
 	ingress  *sandbox.IngressGuard
-	policy   policy.Policy
 	sessions *session.Store
 	cache    cache.Store
 	ledger   tokens.LedgerStore
@@ -34,7 +43,6 @@ type Gateway struct {
 	counter  tokens.Counter
 	audit    audit.Sink
 	metrics  *gatewayMetrics
-	engine   redact.Detector
 
 	local      llm.Client
 	cloud      llm.Client
@@ -43,6 +51,33 @@ type Gateway struct {
 	preamble   string
 
 	started time.Time
+}
+
+// tenantView is the set of controls in force for one tenant.
+//
+// A tenant may narrow what the operator configured globally — a stricter egress
+// policy, a different rule pack — so each override needs its own compiled
+// detector and its own compression pipeline: the pipeline captures its detector
+// at construction, and a Masker cannot be swapped mid-request without racing
+// every other request using it.
+//
+// Views are built once, at startup or at reload, never per request. There are
+// as many as there are tenant labels, which is a handful, and building one
+// compiles every regex in its rule packs.
+type tenantView struct {
+	engine   redact.Detector
+	pipeline *compressor.Pipeline
+	masker   *compressor.Masker
+	policy   policy.Policy
+}
+
+// viewFor returns the controls in force for a tenant, falling back to the
+// global ones for a tenant with no overrides.
+func (g *Gateway) viewFor(tenant string) tenantView {
+	if v, ok := g.tenants[tenant]; ok {
+		return v
+	}
+	return g.global
 }
 
 // gatewayMetrics holds the registered metric handles.
@@ -61,7 +96,7 @@ type gatewayMetrics struct {
 // price book, or audit destination cannot be loaded, so a misconfigured control
 // prevents startup instead of silently doing nothing.
 func New(cfg config.Config) (*Gateway, error) {
-	engine, err := buildRedactEngine(cfg)
+	engine, err := BuildRedactEngine(cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -99,30 +134,17 @@ func NewWith(
 	}
 
 	g := &Gateway{
-		cfg: cfg,
-		pipeline: compressor.NewPipelineWith(
-			compressor.NewMaskerWith(engine),
-			compressor.NewDrain(),
-			compressor.NewRefDict(),
-			compressor.NewASTPruner(),
-		),
-		// Tool-call arguments are masked but not compressed. Drain and ASTPrune
-		// are lossy by design, and a lossy stage applied to a JSON argument
-		// string produces something the tool cannot be called with. Masking
-		// alone is reversible, so the arguments survive the round trip while
-		// still never leaving unmasked.
-		masker:     compressor.NewMaskerWith(engine),
+		cfg:        cfg,
+		global:     newTenantView(engine, cfg.Policy),
 		router:     rtr,
 		guard:      guard,
 		ingress:    sandbox.NewIngressGuard(),
-		policy:     cfg.Policy,
 		sessions:   session.NewStore(cfg.SessionTTL, cfg.SessionMax),
 		cache:      cache.New(cfg.CacheTTL, cfg.CacheMax),
 		prices:     prices,
 		ledger:     tokens.NewLedger(prices),
 		counter:    tokens.NewHeuristic(),
 		audit:      audit.Nop{},
-		engine:     engine,
 		local:      local,
 		cloud:      cloud,
 		localModel: cfg.Local.Model,
@@ -130,6 +152,15 @@ func NewWith(
 		preamble:   cfg.SystemPreamble,
 		started:    time.Now(),
 	}
+
+	g.limiter = newRateLimiter(&g.cfg)
+
+	views, err := buildTenantViews(cfg, engine)
+	if err != nil {
+		return nil, err
+	}
+	g.tenants = views
+
 	g.metrics = g.registerMetrics()
 	return g, nil
 }
@@ -180,9 +211,67 @@ func (g *Gateway) Close() {
 	}
 }
 
-// buildRedactEngine assembles the detection engine from config, including any
+// newTenantView compiles one tenant's controls.
+//
+// Tool-call arguments are masked but not compressed, so the view carries a bare
+// Masker alongside the full pipeline: Drain and ASTPrune are lossy by design,
+// and a lossy stage applied to a JSON argument string produces something the
+// tool cannot be called with. Masking alone is reversible.
+func newTenantView(engine redact.Detector, p policy.Policy) tenantView {
+	return tenantView{
+		engine: engine,
+		pipeline: compressor.NewPipelineWith(
+			compressor.NewMaskerWith(engine),
+			compressor.NewDrain(),
+			compressor.NewRefDict(),
+			compressor.NewASTPruner(),
+		),
+		masker: compressor.NewMaskerWith(engine),
+		policy: p,
+	}
+}
+
+// buildTenantViews compiles a view for every tenant whose configuration differs
+// from the global one. A tenant that overrides nothing gets no entry and falls
+// through to the global view, so the common deployment allocates nothing extra.
+//
+// A tenant that overrides only its policy shares the global detector rather
+// than compiling an identical copy of it.
+func buildTenantViews(cfg config.Config, global redact.Detector) (map[string]tenantView, error) {
+	out := map[string]tenantView{}
+	for _, label := range cfg.TenantLabels() {
+		t, ok := cfg.Tenants[label]
+		if !ok {
+			continue
+		}
+		engine := global
+		if len(t.RedactPacks) > 0 || len(t.DisableRules) > 0 || len(t.InternalDomains) > 0 {
+			packs, disable, domains := cfg.RedactionFor(label)
+			e, err := BuildRedactEngine(config.Config{
+				RedactPacks:     packs,
+				DisableRules:    disable,
+				InternalDomains: domains,
+				DisableEntropy:  cfg.DisableEntropy,
+				RedactRuleDir:   cfg.RedactRuleDir,
+			})
+			if err != nil {
+				return nil, fmt.Errorf("tenant %q: %w", label, err)
+			}
+			engine = e
+		}
+		out[label] = newTenantView(engine, cfg.PolicyFor(label))
+	}
+	return out, nil
+}
+
+// BuildRedactEngine assembles the detection engine from config, including any
 // site-specific rule packs.
-func buildRedactEngine(cfg config.Config) (*redact.Engine, error) {
+//
+// Exported because the enterprise edition's composite detector wraps the
+// community engine rather than replacing it — a detector that could detect
+// *less* than this one would quietly weaken the leak guarantee its own test
+// corpus is written against.
+func BuildRedactEngine(cfg config.Config) (*redact.Engine, error) {
 	opts := redact.Options{
 		Packs:           cfg.RedactPacks,
 		DisableRules:    cfg.DisableRules,

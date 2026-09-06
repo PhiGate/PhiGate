@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/phigate/phigate/internal/config"
 	"github.com/phigate/phigate/internal/types"
 )
 
@@ -116,8 +117,10 @@ func (a *authenticator) authenticate(r *http.Request) (string, bool) {
 // does not: a runaway client loop does not just degrade PhiGate, it spends real
 // money on the enterprise's upstream account until someone notices the bill.
 type rateLimiter struct {
-	perMin int
-	burst  int
+	// limits resolves a tenant's per-minute allowance and burst. It reads the
+	// configuration rather than capturing two numbers, because a tenant may be
+	// held to a tighter limit than the deployment's default.
+	limits func(tenant string) (perMin, burst int)
 
 	mu      sync.Mutex
 	buckets map[string]*bucket
@@ -126,16 +129,31 @@ type rateLimiter struct {
 type bucket struct {
 	tokens float64
 	last   time.Time
+	// perMin and burst are the limits this bucket was filled under, kept so a
+	// reload that tightens a tenant's allowance takes effect on the bucket it
+	// already has rather than only on tenants seen for the first time after.
+	perMin int
+	burst  int
 }
 
-func newRateLimiter(perMin, burst int) *rateLimiter {
-	if perMin <= 0 {
+// newRateLimiter returns a limiter over cfg, or nil when no tenant is limited.
+//
+// A nil limiter allows everything, so the common unlimited deployment pays for
+// no bookkeeping at all.
+func newRateLimiter(cfg *config.Config) *rateLimiter {
+	limited := cfg.RateLimitPerMin > 0
+	for _, t := range cfg.Tenants {
+		if t.RateLimitPerMin > 0 {
+			limited = true
+		}
+	}
+	if !limited {
 		return nil
 	}
-	if burst <= 0 {
-		burst = perMin
+	return &rateLimiter{
+		limits:  cfg.RateLimitFor,
+		buckets: map[string]*bucket{},
 	}
-	return &rateLimiter{perMin: perMin, burst: burst, buckets: map[string]*bucket{}}
 }
 
 // Allow reports whether the tenant may make another request now.
@@ -143,17 +161,31 @@ func (l *rateLimiter) Allow(tenant string) bool {
 	if l == nil {
 		return true
 	}
+	perMin, burst := l.limits(tenant)
+	if perMin <= 0 {
+		return true // this tenant is not limited
+	}
+	if burst <= 0 {
+		burst = perMin
+	}
+
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
 	now := time.Now()
 	b, ok := l.buckets[tenant]
 	if !ok {
-		b = &bucket{tokens: float64(l.burst), last: now}
+		b = &bucket{tokens: float64(burst), last: now, perMin: perMin, burst: burst}
 		l.buckets[tenant] = b
 	}
-	refill := now.Sub(b.last).Minutes() * float64(l.perMin)
-	b.tokens = minFloat(float64(l.burst), b.tokens+refill)
+	if b.perMin != perMin || b.burst != burst {
+		// The limits changed under us. Clamp to the new ceiling so a tightened
+		// allowance cannot be outrun by a bucket filled under the old one.
+		b.perMin, b.burst = perMin, burst
+		b.tokens = minFloat(b.tokens, float64(burst))
+	}
+	refill := now.Sub(b.last).Minutes() * float64(b.perMin)
+	b.tokens = minFloat(float64(b.burst), b.tokens+refill)
 	b.last = now
 	if b.tokens < 1 {
 		return false

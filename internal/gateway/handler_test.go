@@ -1122,3 +1122,115 @@ func TestToolSchemaNumbersKeepTheirPrecision(t *testing.T) {
 		t.Errorf("schema bound lost precision on the round trip: %s", out)
 	}
 }
+
+// newMultiTenantGateway builds a gateway whose "strict" tenant is held to a
+// tighter egress policy than the deployment default.
+func newMultiTenantGateway(t *testing.T, local, cloud llm.Client) *Gateway {
+	t.Helper()
+	cfg := testConfig()
+	cfg.AllowAnonymous = false
+	cfg.APIKeys = map[string]string{"k-open": "open", "k-strict": "strict"}
+	strict, err := policy.Parse("low", "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Tenants = map[string]config.Tenant{
+		"strict": {Policy: &strict, RateLimitPerMin: 1, RedactPacks: []string{"jp"}},
+	}
+	if err := config.Validate(&cfg); err != nil {
+		t.Fatalf("config: %v", err)
+	}
+	return newTestGateway(t, cfg, local, cloud)
+}
+
+func postAs(t *testing.T, g *Gateway, key, content string) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"gpt-4o","messages":[{"role":"user","content":`+quote(content)+`}]}`))
+	req.Header.Set("Authorization", "Bearer "+key)
+	g.Routes().ServeHTTP(rec, req)
+	return rec
+}
+
+// TestTenantPolicyIsEnforcedPerRequest: one gateway, two tenants, two egress
+// limits. Before per-tenant configuration this needed two deployments.
+func TestTenantPolicyIsEnforcedPerRequest(t *testing.T) {
+	local := &fakeClient{name: "local", reply: "ok"}
+	cloud := &fakeClient{name: "cloud", reply: "ok"}
+	g := newMultiTenantGateway(t, local, cloud)
+
+	// An internal hostname is "internal" class: the global policy lets it
+	// reach the cloud, the strict tenant's does not.
+	const q = "check web-1.corp for me"
+
+	if rec := postAs(t, g, "k-open", q); rec.Header().Get("X-PhiGate-Route") != "cloud" {
+		// Routing is advisory, so assert on what the policy permitted instead.
+		if rec.Header().Get("X-PhiGate-Policy") != "allow" {
+			t.Errorf("open tenant policy = %q, want allow", rec.Header().Get("X-PhiGate-Policy"))
+		}
+	}
+	rec := postAs(t, g, "k-strict", q)
+	if got := rec.Header().Get("X-PhiGate-Policy"); got != "local_only" {
+		t.Fatalf("strict tenant policy = %q, want local_only — the tenant override "+
+			"did not reach the request path", got)
+	}
+}
+
+// TestTenantRateLimitIsSeparate: a tenant's own limit applies to that tenant
+// and leaves the others alone.
+func TestTenantRateLimitIsSeparate(t *testing.T) {
+	local := &fakeClient{name: "local", reply: "ok"}
+	g := newMultiTenantGateway(t, local, &fakeClient{name: "cloud"})
+
+	if rec := postAs(t, g, "k-strict", "hello"); rec.Code != 200 {
+		t.Fatalf("first strict request: %d", rec.Code)
+	}
+	if rec := postAs(t, g, "k-strict", "hello again"); rec.Code != 429 {
+		t.Errorf("second strict request: %d, want 429 (limit is 1/min)", rec.Code)
+	}
+	// The unlimited tenant is untouched by its neighbour's exhaustion.
+	for i := range 3 {
+		if rec := postAs(t, g, "k-open", "hello"); rec.Code != 200 {
+			t.Fatalf("open request %d: %d, want 200", i, rec.Code)
+		}
+	}
+}
+
+// TestTenantRuleSetIsSeparate: the strict tenant runs the jp pack only, so a
+// value only the core pack detects is not masked for it — and the auditor
+// endpoint reports the rule set that actually applies to the caller.
+func TestTenantRuleSetIsSeparate(t *testing.T) {
+	local := &fakeClient{name: "local", reply: "ok"}
+	g := newMultiTenantGateway(t, local, &fakeClient{name: "cloud"})
+
+	rulesFor := func(key string) map[string]any {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", "/v1/phigate/rules", nil)
+		req.Header.Set("Authorization", "Bearer "+key)
+		g.Routes().ServeHTTP(rec, req)
+		var out map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatalf("decode rules: %v", err)
+		}
+		return out
+	}
+
+	open, strict := rulesFor("k-open"), rulesFor("k-strict")
+	if open["tenant"] != "open" || strict["tenant"] != "strict" {
+		t.Fatalf("rules endpoint did not report the caller's tenant: %v / %v",
+			open["tenant"], strict["tenant"])
+	}
+	if strict["tenant_overridden"] != true {
+		t.Error("strict tenant not reported as overridden")
+	}
+	nOpen := len(open["redaction"].([]any))
+	nStrict := len(strict["redaction"].([]any))
+	if nStrict >= nOpen {
+		t.Errorf("strict tenant has %d rules and open has %d; the jp-only override "+
+			"should be the smaller set", nStrict, nOpen)
+	}
+	if strict["policy"] == open["policy"] {
+		t.Error("both tenants reported the same policy")
+	}
+}

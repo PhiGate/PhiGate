@@ -47,8 +47,8 @@ func (g *Gateway) handleDashboard(w http.ResponseWriter, _ *http.Request) {
 	t := g.ledger.Totals()
 	cs := g.cache.Stats()
 
-	redact := make([]string, 0, len(g.engine.Rules()))
-	for _, r := range g.engine.Rules() {
+	redact := make([]string, 0, len(g.global.engine.Rules()))
+	for _, r := range g.global.engine.Rules() {
 		redact = append(redact, r.Name+" — "+string(r.Category))
 	}
 	sort.Strings(redact)
@@ -60,7 +60,7 @@ func (g *Gateway) handleDashboard(w http.ResponseWriter, _ *http.Request) {
 		Cache:        cs,
 		CacheHitPct:  trimFloat(cs.HitRate * 100),
 		Sessions:     g.sessions.Len(),
-		Policy:       g.policy.Describe(),
+		Policy:       g.global.policy.Describe(),
 		GuardRules:   g.guard.Describe(),
 		RedactRules:  redact,
 		Currency:     t.Currency,

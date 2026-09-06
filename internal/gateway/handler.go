@@ -26,7 +26,10 @@ import (
 // drifting apart. The previous version duplicated routing and fallback logic
 // across the two, and the copies had already diverged.
 type requestPlan struct {
-	sess       *compressor.Session
+	sess   *compressor.Session
+	tenant string
+	// view is the tenant's controls: its detector, its pipelines, its policy.
+	view       tenantView
 	compressed []types.Message
 	// tools is the rewritten `tools` definition, or nil when the request
 	// carried none and the original passthrough stands.
@@ -96,6 +99,12 @@ func (g *Gateway) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 func (g *Gateway) plan(r *http.Request, req *types.ChatCompletionRequest) (*requestPlan, error) {
 	p := &requestPlan{start: time.Now()}
 
+	// Every control below is the caller's tenant's, resolved once so the rest
+	// of the request cannot accidentally mix one tenant's detector with
+	// another's policy.
+	p.tenant = tenantOf(r)
+	p.view = g.viewFor(p.tenant)
+
 	// Session continuity: one conversation reuses one dictionary, so a given
 	// IP is <V1> in every turn rather than a different token each time.
 	p.sess = g.sessions.Get(strings.TrimSpace(r.Header.Get(g.cfg.SessionHeader)))
@@ -119,13 +128,13 @@ func (g *Gateway) plan(r *http.Request, req *types.ChatCompletionRequest) (*requ
 	p.compressed = make([]types.Message, 0, len(req.Messages))
 	var routeParts []string
 	for _, m := range req.Messages {
-		c, err := g.pipeline.Compress(m.Content, p.sess)
+		c, err := p.view.pipeline.Compress(m.Content, p.sess)
 		if err != nil {
 			return nil, err
 		}
 		out := m
 		out.Content = c
-		if err := g.maskToolCalls(&out, m, p.sess); err != nil {
+		if err := g.maskToolCalls(p.view, &out, m, p.sess); err != nil {
 			return nil, err
 		}
 		p.compressed = append(p.compressed, out)
@@ -137,7 +146,7 @@ func (g *Gateway) plan(r *http.Request, req *types.ChatCompletionRequest) (*requ
 	// The tool definitions are classified and their descriptions masked. This
 	// runs after the messages so a value first seen in a message keeps the
 	// token it was already given.
-	toolsJSON, err := g.scanTools(req, p.sess)
+	toolsJSON, err := g.scanTools(p.view, req, p.sess)
 	if err != nil {
 		return nil, err
 	}
@@ -159,7 +168,7 @@ func (g *Gateway) plan(r *http.Request, req *types.ChatCompletionRequest) (*requ
 		g.metrics.redacted.Add(int64(n), string(cat))
 	}
 
-	p.verdict = g.policy.Evaluate(p.sess.MaxSensitivity())
+	p.verdict = p.view.policy.Evaluate(p.sess.MaxSensitivity())
 
 	routed, err := g.router.Route(r.Context(), strings.Join(routeParts, "\n"))
 	if err != nil {
@@ -186,7 +195,7 @@ func (g *Gateway) plan(r *http.Request, req *types.ChatCompletionRequest) (*requ
 	p.event = audit.Event{
 		RequestID:       requestIDOf(r),
 		SessionID:       p.sess.ID,
-		Tenant:          tenantOf(r),
+		Tenant:          p.tenant,
 		ClientIP:        clientIP(r, g.cfg.TrustedProxyHeader),
 		Model:           req.Model,
 		PromptHash:      audit.Hash(strings.Join(compressedTexts, "\n")),
@@ -214,7 +223,7 @@ func (g *Gateway) plan(r *http.Request, req *types.ChatCompletionRequest) (*requ
 // an argument raises the payload's classification and the egress policy sees it.
 // That is the whole point: before this, the classifier read Content only, and a
 // tool-call turn has no Content at all.
-func (g *Gateway) maskToolCalls(dst *types.Message, src types.Message, sess *compressor.Session) error {
+func (g *Gateway) maskToolCalls(view tenantView, dst *types.Message, src types.Message, sess *compressor.Session) error {
 	if len(src.ToolCalls) == 0 {
 		return nil
 	}
@@ -225,7 +234,7 @@ func (g *Gateway) maskToolCalls(dst *types.Message, src types.Message, sess *com
 			continue
 		}
 		fn := *tc.Function
-		masked, err := g.masker.Process(fn.Arguments, sess)
+		masked, err := view.masker.Process(fn.Arguments, sess)
 		if err != nil {
 			return err
 		}
@@ -258,7 +267,7 @@ func (g *Gateway) blockingResponse(w http.ResponseWriter, r *http.Request, p *re
 	// Fallback is permitted only for payloads the policy already cleared for
 	// cloud egress. A local-only payload fails instead of leaking.
 	if err != nil && p.routed.Target == router.TargetLocal {
-		if g.policy.CloudFallbackAllowed(p.verdict) {
+		if p.view.policy.CloudFallbackAllowed(p.verdict) {
 			client, model = g.cloud, g.cloudModel
 			upstream = g.buildUpstream(model, *req, p, false)
 			backend = client.Name()

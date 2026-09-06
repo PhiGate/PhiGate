@@ -66,7 +66,7 @@ func (g *Gateway) streamResponse(w http.ResponseWriter, r *http.Request, p *requ
 
 	// Fallback only before the first byte, and only when policy permits it.
 	if err != nil && !sw.started && p.routed.Target == router.TargetLocal {
-		if g.policy.CloudFallbackAllowed(p.verdict) {
+		if p.view.policy.CloudFallbackAllowed(p.verdict) {
 			client, model = g.cloud, g.cloudModel
 			p.event.FellBackCloud = true
 			p.event.RouteReason += " -> fell back to cloud after local error"

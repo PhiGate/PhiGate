@@ -30,9 +30,8 @@ func (g *Gateway) Routes() http.Handler {
 	mux.HandleFunc("/readyz", g.handleReadyz)
 
 	auth := newAuthenticator(g.cfg.APIKeys, g.cfg.AllowAnonymous)
-	limiter := newRateLimiter(g.cfg.RateLimitPerMin, g.cfg.RateLimitBurst)
 	protect := func(h http.HandlerFunc) http.Handler {
-		return auth.Wrap(limiter.Wrap(h))
+		return auth.Wrap(g.limiter.Wrap(h))
 	}
 
 	mux.Handle("/v1/chat/completions", protect(g.handleChatCompletions))
@@ -112,7 +111,7 @@ func (g *Gateway) handleReadyz(w http.ResponseWriter, r *http.Request) {
 		Status:   state,
 		Uptime:   time.Since(g.started).Round(time.Second).String(),
 		Backends: backends,
-		Policy:   g.policy.Describe(),
+		Policy:   g.global.policy.Describe(),
 		Cache:    g.cache.Stats().Enabled,
 		Audit:    g.audit.Enabled(),
 	})
@@ -151,8 +150,8 @@ type statsResponse struct {
 
 func (g *Gateway) handleStats(w http.ResponseWriter, _ *http.Request) {
 	t := g.ledger.Totals()
-	rules := make([]string, 0, len(g.engine.Rules()))
-	for _, r := range g.engine.Rules() {
+	rules := make([]string, 0, len(g.global.engine.Rules()))
+	for _, r := range g.global.engine.Rules() {
 		rules = append(rules, r.Name+" ("+string(r.Category)+")")
 	}
 	writeJSON(w, http.StatusOK, statsResponse{
@@ -161,7 +160,7 @@ func (g *Gateway) handleStats(w http.ResponseWriter, _ *http.Request) {
 		SavedPct:  formatPercent(t.SavingsPercent()),
 		Cache:     g.cache.Stats(),
 		Sessions:  g.sessions.Len(),
-		Policy:    g.policy.Describe(),
+		Policy:    g.global.policy.Describe(),
 		Guard:     g.guard.Describe(),
 		Redaction: rules,
 		Prices:    g.prices.Prices(),
@@ -174,21 +173,33 @@ func (g *Gateway) handleStats(w http.ResponseWriter, _ *http.Request) {
 
 // handleRules exposes the effective control configuration, so an auditor can
 // confirm what is enforced without reading the deployment's environment.
-func (g *Gateway) handleRules(w http.ResponseWriter, _ *http.Request) {
+//
+// "Effective" means effective *for the caller*. Where a tenant narrows the
+// global configuration, an auditor holding that tenant's key is shown what
+// applies to that tenant — reporting the global settings instead would tell
+// them a rule set is in force that their own traffic is not subject to.
+func (g *Gateway) handleRules(w http.ResponseWriter, r *http.Request) {
 	type ruleView struct {
 		Name     string `json:"name"`
 		Category string `json:"category"`
 		Priority int    `json:"priority"`
 		Desc     string `json:"description,omitempty"`
 	}
-	views := make([]ruleView, 0, len(g.engine.Rules()))
-	for _, r := range g.engine.Rules() {
-		views = append(views, ruleView{r.Name, string(r.Category), r.Priority, r.Description})
+	tenant := tenantOf(r)
+	view := g.viewFor(tenant)
+
+	rules := view.engine.Rules()
+	views := make([]ruleView, 0, len(rules))
+	for _, rl := range rules {
+		views = append(views, ruleView{rl.Name, string(rl.Category), rl.Priority, rl.Description})
 	}
+	_, overridden := g.tenants[tenant]
 	writeJSON(w, http.StatusOK, map[string]any{
-		"redaction": views,
-		"egress":    g.guard.Describe(),
-		"policy":    g.policy.Describe(),
+		"tenant":            tenant,
+		"tenant_overridden": overridden,
+		"redaction":         views,
+		"egress":            g.guard.Describe(),
+		"policy":            view.policy.Describe(),
 	})
 }
 
@@ -225,15 +236,19 @@ func (g *Gateway) handleDebugCompress(w http.ResponseWriter, r *http.Request) {
 	}
 	original := string(raw)
 
+	// The debug view is the caller's own, so an operator inspecting what a
+	// tenant's traffic looks like sees that tenant's rule set rather than the
+	// global one.
+	view := g.viewFor(tenantOf(r))
 	sess := compressor.NewSession()
-	compressed, err := g.pipeline.Compress(original, sess)
+	compressed, err := view.pipeline.Compress(original, sess)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "compression error", "api_error", "")
 		return
 	}
 	hydrated := sess.Dict.Hydrate(compressed)
 	decision, _ := g.router.Route(r.Context(), compressed)
-	verdict := g.policy.Evaluate(sess.MaxSensitivity())
+	verdict := view.policy.Evaluate(sess.MaxSensitivity())
 
 	findings := map[string]int{}
 	for cat, n := range sess.Categories() {

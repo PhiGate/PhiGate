@@ -32,7 +32,7 @@ import (
 // pasted into a tool description raises MaxSensitivity and pins the request to
 // the local backend rather than travelling to a cloud provider on every single
 // request that carries this tool set.
-func (g *Gateway) scanTools(req *types.ChatCompletionRequest, sess *compressor.Session) (json.RawMessage, error) {
+func (g *Gateway) scanTools(view tenantView, req *types.ChatCompletionRequest, sess *compressor.Session) (json.RawMessage, error) {
 	raw, ok := req.Extra["tools"]
 	if !ok || len(raw) == 0 {
 		return nil, nil
@@ -50,7 +50,7 @@ func (g *Gateway) scanTools(req *types.ChatCompletionRequest, sess *compressor.S
 		// only inspects.
 		return nil, nil
 	}
-	rewritten, err := g.walkTools(decoded, "", sess)
+	rewritten, err := g.walkTools(view, decoded, "", sess)
 	if err != nil {
 		return nil, err
 	}
@@ -64,19 +64,19 @@ func (g *Gateway) scanTools(req *types.ChatCompletionRequest, sess *compressor.S
 // walkTools recurses through the decoded definition. key is the object key the
 // value was found under, which is what decides masking from classification;
 // array elements inherit their array's key.
-func (g *Gateway) walkTools(v any, key string, sess *compressor.Session) (any, error) {
+func (g *Gateway) walkTools(view tenantView, v any, key string, sess *compressor.Session) (any, error) {
 	switch t := v.(type) {
 	case string:
 		if key == "description" {
-			return g.masker.Process(t, sess)
+			return view.masker.Process(t, sess)
 		}
-		g.classify(t, sess)
+		g.classify(view, t, sess)
 		return t, nil
 
 	case []any:
 		out := make([]any, len(t))
 		for i, e := range t {
-			r, err := g.walkTools(e, key, sess)
+			r, err := g.walkTools(view, e, key, sess)
 			if err != nil {
 				return nil, err
 			}
@@ -87,8 +87,8 @@ func (g *Gateway) walkTools(v any, key string, sess *compressor.Session) (any, e
 	case map[string]any:
 		out := make(map[string]any, len(t))
 		for k, e := range t {
-			g.classify(k, sess)
-			r, err := g.walkTools(e, k, sess)
+			g.classify(view, k, sess)
+			r, err := g.walkTools(view, e, k, sess)
 			if err != nil {
 				return nil, err
 			}
@@ -107,11 +107,11 @@ func (g *Gateway) walkTools(v any, key string, sess *compressor.Session) (any, e
 // no token is allocated for a value that is being left in place — a dictionary
 // entry for a string that was never masked would hydrate other occurrences of
 // it in the answer, which is not what the caller asked for.
-func (g *Gateway) classify(text string, sess *compressor.Session) {
+func (g *Gateway) classify(view tenantView, text string, sess *compressor.Session) {
 	if text == "" {
 		return
 	}
-	_, findings := g.engine.Redact(text, func(f redact.Finding) string { return f.Text })
+	_, findings := view.engine.Redact(text, func(f redact.Finding) string { return f.Text })
 	for _, f := range findings {
 		sess.Note(f)
 	}
