@@ -27,6 +27,27 @@ read.
   retention refuses to remove a segment younger than the configured period, with
   a zero retention deleting nothing.
 
+- **Claude as a backend, first-party and on Amazon Bedrock.** `provider` accepts
+  `anthropic` and `bedrock` alongside `openai` and `azure`. Neither speaks
+  OpenAI's wire format, so they are dialects PhiGate translates to rather than
+  base URLs it points at: system prompts move to a top-level field (PhiGate
+  prepends a preamble explaining its placeholders — left as a message the model
+  would answer it rather than obey it), `max_tokens` becomes required, content
+  is a list of typed blocks, and a tool result is a user turn. Tool calls are
+  translated in both directions so they are masked and guarded as on any other
+  backend.
+
+  Implemented against `net/http` rather than an SDK, including AWS SigV4, so
+  CE's single-third-party-dependency property survives — `make ce-purity` still
+  passes. The signature is cross-checked byte-for-byte against an independent
+  implementation of the same specification.
+
+  Two limits stated rather than discovered: Bedrock streaming is unsupported (its
+  event stream is a binary framing, not SSE) and says so instead of pretending;
+  and the AWS credential chain is not implemented — credentials come from config
+  or the standard `AWS_*` variables, and a misconfigured Bedrock backend fails at
+  startup rather than on the first request.
+
 - **`POST /v1/embeddings`.** In a RAG deployment the text sent for embedding is
   the corpus, which is the most sensitive traffic the gateway will ever see, and
   until now a client doing retrieval had to send it straight to the provider

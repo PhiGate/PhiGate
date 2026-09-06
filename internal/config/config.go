@@ -44,6 +44,22 @@ type Backend struct {
 	APIVersion string
 	Deployment string
 	Timeout    time.Duration
+
+	// --- Bedrock ---
+
+	// Region is the AWS region. Empty falls back to AWS_REGION.
+	Region string
+	// AccessKeyID, SecretAccessKey and SessionToken are static AWS
+	// credentials. Empty falls back to the standard AWS_* variables.
+	//
+	// The full AWS credential chain — instance metadata, SSO, profile files,
+	// AssumeRole — is deliberately not implemented: it is a much larger
+	// surface than the signature itself, and half of one is worse than none.
+	// A deployment that needs it should put credentials in the environment
+	// with the tooling it already uses.
+	AccessKeyID     string
+	SecretAccessKey string
+	SessionToken    string
 }
 
 // Tenant overrides global settings for the clients holding one tenant's API
@@ -597,6 +613,10 @@ func backendFromEnv(b *Backend, prefix string) error {
 	setStr(&b.APIKey, "PHIGATE_"+prefix+"_API_KEY")
 	setStr(&b.APIVersion, "PHIGATE_"+prefix+"_API_VERSION")
 	setStr(&b.Deployment, "PHIGATE_"+prefix+"_DEPLOYMENT")
+	setStr(&b.Region, "PHIGATE_"+prefix+"_REGION")
+	setStr(&b.AccessKeyID, "PHIGATE_"+prefix+"_ACCESS_KEY_ID")
+	setStr(&b.SecretAccessKey, "PHIGATE_"+prefix+"_SECRET_ACCESS_KEY")
+	setStr(&b.SessionToken, "PHIGATE_"+prefix+"_SESSION_TOKEN")
 	setDuration(&b.Timeout, "PHIGATE_"+prefix+"_TIMEOUT")
 	return nil
 }

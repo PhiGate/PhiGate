@@ -84,6 +84,11 @@ type fileBackend struct {
 	APIVersion *string `json:"api_version"`
 	Deployment *string `json:"deployment"`
 	Timeout    *string `json:"timeout"`
+
+	Region          *string `json:"region"`
+	AccessKeyID     *string `json:"access_key_id"`
+	SecretAccessKey *string `json:"secret_access_key"`
+	SessionToken    *string `json:"session_token"`
 }
 
 type filePolicy struct {
@@ -313,6 +318,10 @@ func (b *fileBackend) apply(dst *Backend, name string) error {
 	assign(&dst.APIKey, b.APIKey)
 	assign(&dst.APIVersion, b.APIVersion)
 	assign(&dst.Deployment, b.Deployment)
+	assign(&dst.Region, b.Region)
+	assign(&dst.AccessKeyID, b.AccessKeyID)
+	assign(&dst.SecretAccessKey, b.SecretAccessKey)
+	assign(&dst.SessionToken, b.SessionToken)
 	return assignDuration(&dst.Timeout, b.Timeout, name+".timeout")
 }
 

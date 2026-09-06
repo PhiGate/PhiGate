@@ -432,15 +432,44 @@ billed API key is an open relay.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `PHIGATE_LOCAL_PROVIDER` | `openai` | `openai` \| `azure` |
+| `PHIGATE_LOCAL_PROVIDER` | `openai` | `openai` \| `azure` \| `anthropic` \| `bedrock` |
 | `PHIGATE_LOCAL_BASE_URL` | `http://localhost:11434/v1` | Ollama / vLLM / llama.cpp |
 | `PHIGATE_LOCAL_MODEL` | `phi4-mini` | must match `ollama list` exactly |
-| `PHIGATE_CLOUD_PROVIDER` | `openai` | `azure` for Azure OpenAI |
+| `PHIGATE_CLOUD_PROVIDER` | `openai` | `azure`, `anthropic` or `bedrock` |
 | `PHIGATE_CLOUD_BASE_URL` | `https://api.openai.com/v1` | Azure: the resource root |
 | `PHIGATE_CLOUD_MODEL` | `gpt-4o` | |
 | `PHIGATE_CLOUD_API_KEY` | (`OPENAI_API_KEY`) | |
 | `PHIGATE_CLOUD_API_VERSION` | `2024-10-21` | Azure only |
-| `PHIGATE_CLOUD_DEPLOYMENT` | (model name) | Azure deployment name |
+| `PHIGATE_CLOUD_DEPLOYMENT` | (model name) | Azure deployment name; on Bedrock, an inference profile ARN |
+| `PHIGATE_CLOUD_REGION` | (`AWS_REGION`) | Bedrock only |
+| `PHIGATE_CLOUD_ACCESS_KEY_ID` | (`AWS_ACCESS_KEY_ID`) | Bedrock only |
+| `PHIGATE_CLOUD_SECRET_ACCESS_KEY` | (`AWS_SECRET_ACCESS_KEY`) | Bedrock only |
+| `PHIGATE_CLOUD_SESSION_TOKEN` | (`AWS_SESSION_TOKEN`) | Bedrock only, for temporary credentials |
+
+**Claude, first-party or on Bedrock.** Neither speaks OpenAI's wire format, so
+they are dialects PhiGate translates to rather than base URLs it points at —
+system prompts move to a top-level field, `max_tokens` becomes required, and
+content is a list of typed blocks. Tool calls are translated in both directions,
+so they are masked and guarded exactly as on any other backend.
+
+```json
+{ "cloud": { "provider": "anthropic", "model": "claude-opus-5",
+             "base_url": "https://api.anthropic.com", "api_key": "sk-ant-..." } }
+```
+
+```json
+{ "cloud": { "provider": "bedrock", "model": "anthropic.claude-opus-5",
+             "base_url": "https://bedrock-runtime.ap-northeast-1.amazonaws.com",
+             "region": "ap-northeast-1" } }
+```
+
+Bedrock requests are SigV4-signed. Credentials come from the backend config or
+the standard `AWS_*` environment variables; **the full AWS credential chain —
+instance metadata, SSO, profile files, AssumeRole — is not implemented**, and a
+Bedrock backend with no region or no credentials fails at startup rather than on
+the first request. Bedrock **streaming is not supported**: its event stream is a
+binary framing rather than SSE, and the backend says so plainly instead of
+pretending. Use a non-streaming request, or the first-party API.
 
 </details>
 

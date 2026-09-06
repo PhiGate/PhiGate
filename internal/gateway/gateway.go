@@ -230,8 +230,14 @@ func New(cfg config.Config) (*Gateway, error) {
 		prices.SetLocalCost(cfg.LocalCostPerM)
 	}
 
-	local := llm.NewClient(BackendConfig("local", cfg.Local, cfg))
-	cloud := llm.NewClient(BackendConfig("cloud", cfg.Cloud, cfg))
+	local, err := llm.NewBackend(BackendConfig("local", cfg.Local, cfg))
+	if err != nil {
+		return nil, err
+	}
+	cloud, err := llm.NewBackend(BackendConfig("cloud", cfg.Cloud, cfg))
+	if err != nil {
+		return nil, err
+	}
 
 	return NewWith(cfg, engine, prices, local, cloud, router.NewHeuristicRouter())
 }
@@ -419,7 +425,12 @@ func BackendConfig(name string, b config.Backend, cfg config.Config) llm.Provide
 		Name:             name,
 		Provider:         b.Provider,
 		BaseURL:          b.BaseURL,
+		Model:            b.Model,
 		APIKey:           b.APIKey,
+		Region:           b.Region,
+		AccessKeyID:      b.AccessKeyID,
+		SecretAccessKey:  b.SecretAccessKey,
+		SessionToken:     b.SessionToken,
 		APIVersion:       b.APIVersion,
 		Deployment:       b.Deployment,
 		Timeout:          b.Timeout,

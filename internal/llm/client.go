@@ -32,6 +32,22 @@ type Client interface {
 	Name() string
 }
 
+// NewBackend builds the client for a backend's dialect.
+//
+// It returns an error where NewClient could not, because two of the dialects
+// can be *configured* wrongly in ways that are only knowable at construction —
+// a Bedrock backend with no region or no credentials cannot sign anything, and
+// discovering that on the first request would turn a configuration mistake into
+// an upstream outage.
+func NewBackend(cfg ProviderConfig, opts ...Option) (Client, error) {
+	switch cfg.Provider {
+	case ProviderAnthropic, ProviderBedrock:
+		return NewAnthropicClient(cfg, opts...)
+	default:
+		return NewClient(cfg, opts...), nil
+	}
+}
+
 // Embedder is the optional half of the client contract, implemented by a
 // backend that can produce embeddings.
 //
