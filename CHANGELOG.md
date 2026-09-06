@@ -27,6 +27,16 @@ read.
   retention refuses to remove a segment younger than the configured period, with
   a zero retention deleting nothing.
 
+- **Current Claude models in the built-in price book**, so savings are reported
+  rather than counted as unpriced. This also fixes a latent mispricing: the book
+  matches longest-name-first, so `claude-opus-4-8` inherited the older
+  `claude-opus-4` entry at $15/$75 where its rate is $5/$25 — a threefold
+  overstatement in a figure a finance team is asked to trust. Bedrock model ids
+  (`anthropic.claude-*`) are deliberately left unpriced: that platform is
+  partner-operated with its own rates, and aliasing them onto first-party prices
+  would report a number that is confidently wrong, where an unpriced request is
+  visible in `/v1/phigate/stats`.
+
 - **Claude as a backend, first-party and on Amazon Bedrock.** `provider` accepts
   `anthropic` and `bedrock` alongside `openai` and `azure`. Neither speaks
   OpenAI's wire format, so they are dialects PhiGate translates to rather than

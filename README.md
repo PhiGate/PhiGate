@@ -512,7 +512,7 @@ Run `phigate -rules` to print every rule and its classification.
 | `PHIGATE_INGRESS_SCAN` | `true` | prompt-injection screening |
 | `PHIGATE_CACHE_ENABLED` / `_TTL` / `_MAX` | `true` / `15m` / `5000` | template cache |
 | `PHIGATE_SESSION_TTL` / `_MAX` | `30m` / `10000` | multi-turn dictionary continuity |
-| `PHIGATE_PRICE_BOOK` | — | your negotiated rates, in your currency |
+| `PHIGATE_PRICE_BOOK` | — | your negotiated rates, in your currency. The built-in table is list prices for OpenAI, Anthropic and Gemini; Bedrock and Vertex are partner-operated with separate rates and are deliberately **unpriced** rather than aliased onto first-party ones — a request on an unpriced model is counted in `unpriced_requests` on `/v1/phigate/stats`, which is visible in a way that a confidently wrong figure is not |
 | `PHIGATE_LOCAL_COST_PER_MTOK` | `0` | amortise local hardware if finance wants it |
 | `PHIGATE_AUDIT_LOG` | stderr | JSON audit destination |
 | `PHIGATE_DEBUG` | `false` | ⚠️ `/debug/compress` returns plaintext |

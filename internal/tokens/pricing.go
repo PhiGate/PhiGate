@@ -39,17 +39,49 @@ type PriceBook struct {
 	local    float64 // cost per million tokens of self-hosted inference
 }
 
-// DefaultPrices is the built-in table, in USD per million tokens. Local models
-// are priced at zero by default: the marginal cost of a request served by an
-// already-running Ollama instance is close enough to zero that counting it
-// would obscure the comparison. Set PHIGATE_LOCAL_COST_PER_MTOK to amortise
-// hardware if your finance team wants a fully-loaded figure.
+// DefaultPrices is the built-in table, in USD per million tokens, at each
+// vendor's published list rate.
+//
+// Local models are priced at zero by default: the marginal cost of a request
+// served by an already-running Ollama instance is close enough to zero that
+// counting it would obscure the comparison. Set PHIGATE_LOCAL_COST_PER_MTOK to
+// amortise hardware if your finance team wants a fully-loaded figure.
+//
+// # Two things to know before trusting a figure computed from this
+//
+// **These are list prices and they go stale.** A deployment that reports money
+// to a finance team should supply its own book — PHIGATE_PRICE_BOOK — at its
+// negotiated rates and in its own currency. That is what the override exists
+// for, and the ledger records which price it applied so the numbers reconcile.
+//
+// **Partner-operated platforms are deliberately absent.** Claude on Amazon
+// Bedrock is addressed as "anthropic.claude-opus-5", which matches no entry
+// here, and that is on purpose: Bedrock and Vertex are partner-operated with
+// their own pricing, and aliasing them onto the first-party rate would report a
+// number that is confidently wrong. An unmatched model is counted in
+// Totals.UnpricedRequests and surfaced by /v1/phigate/stats, so a Bedrock
+// deployment can see that it needs to supply a book rather than quietly
+// believing a figure.
 var DefaultPrices = []Price{
 	{Model: "gpt-4o-mini", InputPerMillion: 0.15, OutputPerMillion: 0.60},
 	{Model: "gpt-4o", InputPerMillion: 2.50, OutputPerMillion: 10.00},
 	{Model: "gpt-4.1-mini", InputPerMillion: 0.40, OutputPerMillion: 1.60},
 	{Model: "gpt-4.1", InputPerMillion: 2.00, OutputPerMillion: 8.00},
 	{Model: "o3-mini", InputPerMillion: 1.10, OutputPerMillion: 4.40},
+	// Anthropic, first-party list rates. Entries are matched longest-name
+	// first, which is what keeps "claude-opus-4-8" from inheriting the older
+	// "claude-opus-4" rate — a 3x overstatement, and the reason the specific
+	// generations are enumerated rather than left to a family prefix.
+	{Model: "claude-fable-5-1", InputPerMillion: 10.00, OutputPerMillion: 50.00},
+	{Model: "claude-mythos-5-1", InputPerMillion: 10.00, OutputPerMillion: 50.00},
+	{Model: "claude-fable-5", InputPerMillion: 10.00, OutputPerMillion: 50.00},
+	{Model: "claude-opus-5", InputPerMillion: 5.00, OutputPerMillion: 25.00},
+	{Model: "claude-opus-4-8", InputPerMillion: 5.00, OutputPerMillion: 25.00},
+	{Model: "claude-opus-4-7", InputPerMillion: 5.00, OutputPerMillion: 25.00},
+	{Model: "claude-opus-4-6", InputPerMillion: 5.00, OutputPerMillion: 25.00},
+	{Model: "claude-sonnet-5", InputPerMillion: 2.00, OutputPerMillion: 10.00},
+	{Model: "claude-sonnet-4-6", InputPerMillion: 3.00, OutputPerMillion: 15.00},
+	{Model: "claude-haiku-4-5", InputPerMillion: 1.00, OutputPerMillion: 5.00},
 	{Model: "claude-3-5-haiku", InputPerMillion: 0.80, OutputPerMillion: 4.00},
 	{Model: "claude-3-5-sonnet", InputPerMillion: 3.00, OutputPerMillion: 15.00},
 	{Model: "claude-sonnet-4", InputPerMillion: 3.00, OutputPerMillion: 15.00},
