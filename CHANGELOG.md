@@ -12,6 +12,55 @@ read.
 
 ## [Unreleased]
 
+### Changed — what may leave the network
+
+- **Tool-call arguments are now masked.** An assistant turn that invokes a tool
+  carries no message content: its payload is the JSON string in
+  `tool_calls[].function.arguments`. That field rode along in the verbatim
+  passthrough, so it reached the upstream provider in the clear, and the egress
+  classifier — which reads message content — never saw it. A My Number in a tool
+  argument therefore egressed *and* raised the payload's sensitivity not at all.
+  Arguments are masked (never compressed: the lossy stages would produce
+  something the tool cannot be called with) and classified on the same session
+  as message content, so they now drive the egress policy like anything else.
+
+- **Tool *definitions* are classified, and their descriptions masked.** The
+  `tools` block was invisible to the policy for the same reason. Descriptions
+  are prose the model reads and are masked; function names, property names and
+  enum members are contract and are left exactly as sent, because masking one
+  produces a tool the model cannot invoke. Everything in the block is scanned.
+
+- **Tool calls in an answer are guarded.** A tool whose job is to run a command
+  carries that command in its arguments, so the egress guard now extracts and
+  inspects the argument strings. A blocked answer drops its tool calls as well:
+  withholding the prose while handing back the call it described defeats the
+  block, because an agent executes the call, not the notice.
+
+### Fixed
+
+- **Streamed tool calls were dropped entirely.** Every tool-call chunk has an
+  empty `content`, and the SSE client skipped chunks on exactly that condition,
+  so a streamed tool call reached the caller as nothing at all. `StreamFunc`
+  now carries the whole delta. Fragments are reassembled by `index` rather than
+  arrival order, because a model emitting two calls interleaves them, and are
+  released whole at the end of the stream — `<V1>` can arrive split as `<V` and
+  `1>`, and hydrating either half yields nothing. Nothing is lost by waiting: a
+  tool call is not usable in parts.
+
+- **A tool-call answer was never cached, and a cached one came back empty.**
+  The cache entry held content only, and its emptiness check discarded any
+  answer without content — which is every tool-call answer. Entries now carry
+  the calls, still pre-hydration, under the same obligation as content.
+
+- **Cache keys ignored tool calls and tool definitions.** Two requests differing
+  only in their arguments — the entire content of a tool-call turn — collided on
+  one entry, as did the same question asked with a different set of tools
+  available. Both are part of the key now. Requests differing only in a *masked*
+  value still share an entry: that collapse is the template cache working.
+
+- **`"content": null` was re-emitted as `""`.** That is the shape of an
+  assistant tool-call turn, and some providers reject the replayed conversation.
+
 ## [0.3.1] — 2026-08-30
 
 Fixes three defects in 0.3.0's streaming scanner, all found by running the

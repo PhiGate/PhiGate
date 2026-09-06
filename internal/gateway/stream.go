@@ -60,7 +60,7 @@ func (g *Gateway) streamResponse(w http.ResponseWriter, r *http.Request, p *requ
 		return scanner.Write(d.Content)
 	}
 
-	upstream := g.buildUpstream(model, *req, p.compressed, true)
+	upstream := g.buildUpstream(model, *req, p, true)
 	err := client.ChatStream(r.Context(), upstream, feed)
 	g.metrics.upstream.Inc(client.Name(), outcome(err))
 
@@ -74,7 +74,7 @@ func (g *Gateway) streamResponse(w http.ResponseWriter, r *http.Request, p *requ
 			sw.meta.Backend = client.Name()
 			masked.Reset()
 			tools = newToolCallAccumulator()
-			upstream = g.buildUpstream(model, *req, p.compressed, true)
+			upstream = g.buildUpstream(model, *req, p, true)
 			err = client.ChatStream(r.Context(), upstream, feed)
 			g.metrics.upstream.Inc(client.Name(), outcome(err))
 		} else {

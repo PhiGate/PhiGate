@@ -21,6 +21,7 @@ they stop being true. Run them yourself:
 | Claim | Enforced by | Verify with |
 |---|---|---|
 | No credential or personal datum leaves unmasked | [`internal/redact`](internal/redact/) | `go test ./internal/redact/ -run Leak` |
+| …including inside tool calls, which carry no message content at all | [`internal/gateway`](internal/gateway/) | `go test ./internal/gateway/ -run ToolCall` |
 | A value is never *partially* masked | single-pass overlap resolution | same test — partial leaks fail it |
 | Data above your sensitivity limit never reaches the cloud, even on failure | [`internal/policy`](internal/policy/) | `go test ./internal/policy/` |
 | Catastrophic commands never reach the operator | [`internal/sandbox`](internal/sandbox/) | `go test ./internal/sandbox/` |

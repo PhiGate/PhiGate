@@ -21,6 +21,7 @@ PhiGate の 2 つの訴求点はいずれも実測できる性質のものです
 | 主張 | 実装 | 検証コマンド |
 |---|---|---|
 | 認証情報・個人情報がマスクされずに外部へ出ることはない | [`internal/redact`](internal/redact/) | `go test ./internal/redact/ -run Leak` |
+| ツール呼び出しの中身も同様（本文を一切持たない形式であっても） | [`internal/gateway`](internal/gateway/) | `go test ./internal/gateway/ -run ToolCall` |
 | 値が「部分的に」マスクされることはない | 単一パスでの重複解決 | 同上（部分漏洩でも失敗する） |
 | 設定した機密度を超えるデータは、障害時であってもクラウドへ出ない | [`internal/policy`](internal/policy/) | `go test ./internal/policy/` |
 | 破滅的なコマンドが運用者に届くことはない | [`internal/sandbox`](internal/sandbox/) | `go test ./internal/sandbox/` |

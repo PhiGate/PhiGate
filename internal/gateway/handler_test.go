@@ -1004,3 +1004,121 @@ func TestStreamToolCallArgumentsAreMaskedAndCached(t *testing.T) {
 			"session's own host", got)
 	}
 }
+
+// TestToolDefinitionDescriptionsAreMasked: a description is prose the model
+// reads, so masking it is safe and keeps the "nothing unmasked egresses"
+// invariant true for the one block that used to bypass it entirely.
+func TestToolDefinitionDescriptionsAreMasked(t *testing.T) {
+	local := &fakeClient{name: "local", reply: "ok"}
+	g := newTestGateway(t, testConfig(), local, &fakeClient{name: "cloud"})
+
+	body := `{"model":"gpt-4o","messages":[{"role":"user","content":"help"}],
+	  "tools":[{"type":"function","function":{
+	    "name":"restart_host",
+	    "description":"Restart a host. Runbook: wiki.corp is authoritative.",
+	    "parameters":{"type":"object","properties":{
+	      "host":{"type":"string","description":"for example web-1.corp"}}}}}]}`
+	rec, _ := postRaw(t, g, body)
+	if rec.Code != 200 {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+
+	out, err := json.Marshal(local.gotReq)
+	if err != nil {
+		t.Fatalf("marshal upstream: %v", err)
+	}
+	for _, secret := range []string{"wiki.corp", "web-1.corp"} {
+		if strings.Contains(string(out), secret) {
+			t.Errorf("internal host %q left unmasked in a tool description: %s", secret, out)
+		}
+	}
+	// The contract half must survive: masking these makes the tool uncallable.
+	for _, keep := range []string{`"restart_host"`, `"host"`, `"parameters"`, `"type"`} {
+		if !strings.Contains(string(out), keep) {
+			t.Errorf("tool contract lost %s — the model cannot call this tool: %s", keep, out)
+		}
+	}
+}
+
+// TestToolDefinitionsAreClassified: masking descriptions is only half of it.
+// Everything else in the block is scanned so the egress policy sees it, because
+// classification is a control and `tools` was previously invisible to it.
+func TestToolDefinitionsAreClassified(t *testing.T) {
+	local := &fakeClient{name: "local", reply: "ok"}
+	cloud := &fakeClient{name: "cloud", reply: "ok"}
+	g := newTestGateway(t, testConfig(), local, cloud)
+
+	// A credential in a default value — not a description, so it is classified
+	// but deliberately left in place. The policy is what stops it egressing.
+	body := `{"model":"gpt-4o","messages":[{"role":"user","content":"help"}],
+	  "tools":[{"type":"function","function":{"name":"connect","parameters":
+	    {"type":"object","properties":{"dsn":{"type":"string",
+	      "default":"postgres://svc:Hx7kQ2mZpW@db1/app"}}}}}]}`
+	rec, _ := postRaw(t, g, body)
+	if rec.Code != 200 {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	if cloud.calls != 0 {
+		t.Fatalf("a credential in a tool definition reached the cloud (%d calls)", cloud.calls)
+	}
+	if got := rec.Header().Get("X-PhiGate-Sensitivity"); got != "restricted" {
+		t.Errorf("sensitivity = %q, want restricted — the tools block was not classified", got)
+	}
+}
+
+// TestDifferentToolSetsDoNotShareACacheEntry: the same question with a
+// different set of tools available has a different right answer.
+func TestDifferentToolSetsDoNotShareACacheEntry(t *testing.T) {
+	cfg := testConfig()
+	cfg.CacheMax = 100
+	cfg.CacheEnabled = true
+	local := &fakeClient{name: "local", reply: "ok"}
+	g := newTestGateway(t, cfg, local, &fakeClient{name: "cloud"})
+
+	mk := func(tool string) string {
+		return `{"model":"gpt-4o","messages":[{"role":"user","content":"disk full"}],
+		  "tools":[{"type":"function","function":{"name":"` + tool + `"}}]}`
+	}
+	if rec, _ := postRaw(t, g, mk("restart")); rec.Code != 200 {
+		t.Fatalf("first: %d", rec.Code)
+	}
+	rec, _ := postRaw(t, g, mk("page_oncall"))
+	if rec.Header().Get("X-PhiGate-Cache") == "hit" {
+		t.Fatal("two requests offering different tools shared one cache entry")
+	}
+}
+
+// TestMalformedToolsBlockIsPassedThrough: PhiGate inspects `tools`, it does not
+// own it. A block it cannot parse must not turn into a client-visible failure.
+func TestMalformedToolsBlockIsPassedThrough(t *testing.T) {
+	local := &fakeClient{name: "local", reply: "ok"}
+	g := newTestGateway(t, testConfig(), local, &fakeClient{name: "cloud"})
+
+	rec, _ := postRaw(t, g, `{"model":"gpt-4o","messages":[{"role":"user","content":"help"}],
+	  "tools":"not-an-array-but-valid-json"}`)
+	if rec.Code != 200 {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	out, _ := json.Marshal(local.gotReq)
+	if !strings.Contains(string(out), "not-an-array-but-valid-json") {
+		t.Errorf("an unexpected tools shape was dropped rather than passed through: %s", out)
+	}
+}
+
+// TestToolSchemaNumbersKeepTheirPrecision: the block is decoded and re-encoded,
+// and decoding numbers into float64 would silently rewrite a large schema bound.
+func TestToolSchemaNumbersKeepTheirPrecision(t *testing.T) {
+	local := &fakeClient{name: "local", reply: "ok"}
+	g := newTestGateway(t, testConfig(), local, &fakeClient{name: "cloud"})
+
+	rec, _ := postRaw(t, g, `{"model":"gpt-4o","messages":[{"role":"user","content":"help"}],
+	  "tools":[{"type":"function","function":{"name":"f","parameters":
+	    {"type":"object","properties":{"n":{"type":"integer","maximum":9007199254740993}}}}}]}`)
+	if rec.Code != 200 {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	out, _ := json.Marshal(local.gotReq)
+	if !strings.Contains(string(out), "9007199254740993") {
+		t.Errorf("schema bound lost precision on the round trip: %s", out)
+	}
+}

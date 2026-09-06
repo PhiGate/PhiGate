@@ -28,14 +28,17 @@ import (
 type requestPlan struct {
 	sess       *compressor.Session
 	compressed []types.Message
-	routed     router.Decision
-	verdict    policy.Decision
-	ingress    sandbox.IngressVerdict
-	baseline   int
-	promptEst  int
-	cacheKey   string
-	event      audit.Event
-	start      time.Time
+	// tools is the rewritten `tools` definition, or nil when the request
+	// carried none and the original passthrough stands.
+	tools     json.RawMessage
+	routed    router.Decision
+	verdict   policy.Decision
+	ingress   sandbox.IngressVerdict
+	baseline  int
+	promptEst int
+	cacheKey  string
+	event     audit.Event
+	start     time.Time
 }
 
 // handleChatCompletions implements POST /v1/chat/completions:
@@ -131,6 +134,15 @@ func (g *Gateway) plan(r *http.Request, req *types.ChatCompletionRequest) (*requ
 		}
 	}
 
+	// The tool definitions are classified and their descriptions masked. This
+	// runs after the messages so a value first seen in a message keeps the
+	// token it was already given.
+	toolsJSON, err := g.scanTools(req, p.sess)
+	if err != nil {
+		return nil, err
+	}
+	p.tools = toolsJSON
+
 	// Baseline: what the raw prompt would have cost at the cloud model. This is
 	// the counterfactual every savings figure is measured against.
 	p.baseline = tokens.EstimateMessages(g.counter, req.Contents())
@@ -162,7 +174,14 @@ func (g *Gateway) plan(r *http.Request, req *types.ChatCompletionRequest) (*requ
 	}
 	p.routed = routed
 
-	p.cacheKey = cache.Key(g.modelFor(routed.Target), compressedTexts, req.Temperature, req.MaxTokens)
+	// The available tools are part of the key: the same question asked with a
+	// different tool set has a different right answer, so two such requests
+	// must not share an entry.
+	keyParts := compressedTexts
+	if len(p.tools) > 0 {
+		keyParts = append(append([]string(nil), compressedTexts...), string(p.tools))
+	}
+	p.cacheKey = cache.Key(g.modelFor(routed.Target), keyParts, req.Temperature, req.MaxTokens)
 
 	p.event = audit.Event{
 		RequestID:       requestIDOf(r),
@@ -230,7 +249,7 @@ func (g *Gateway) blockingResponse(w http.ResponseWriter, r *http.Request, p *re
 	g.metrics.cacheOps.Inc("miss")
 
 	client, model := g.backendFor(p.routed.Target)
-	upstream := g.buildUpstream(model, *req, p.compressed, false)
+	upstream := g.buildUpstream(model, *req, p, false)
 
 	backend := client.Name()
 	resp, err := client.Chat(r.Context(), upstream)
@@ -241,7 +260,7 @@ func (g *Gateway) blockingResponse(w http.ResponseWriter, r *http.Request, p *re
 	if err != nil && p.routed.Target == router.TargetLocal {
 		if g.policy.CloudFallbackAllowed(p.verdict) {
 			client, model = g.cloud, g.cloudModel
-			upstream = g.buildUpstream(model, *req, p.compressed, false)
+			upstream = g.buildUpstream(model, *req, p, false)
 			backend = client.Name()
 			p.event.FellBackCloud = true
 			p.event.RouteReason += " -> fell back to cloud after local error"
@@ -580,20 +599,34 @@ func (g *Gateway) modelFor(t router.Target) string {
 // buildUpstream assembles the request sent upstream: the system preamble, then
 // the compressed messages, with the backend's model name.
 //
-// Everything the client sent that PhiGate does not model — tools,
-// response_format, top_p, stop, seed, n — rides along in Extra untouched. That
-// is what makes "repoint your base_url" true rather than approximately true.
-func (g *Gateway) buildUpstream(model string, orig types.ChatCompletionRequest, msgs []types.Message, stream bool) *types.ChatCompletionRequest {
-	out := make([]types.Message, 0, len(msgs)+1)
+// Everything the client sent that PhiGate does not model — response_format,
+// top_p, stop, seed, n — rides along in Extra untouched. That is what makes
+// "repoint your base_url" true rather than approximately true. `tools` is the
+// one exception: its descriptions are masked, so the rewritten block replaces
+// the original.
+func (g *Gateway) buildUpstream(model string, orig types.ChatCompletionRequest, p *requestPlan, stream bool) *types.ChatCompletionRequest {
+	out := make([]types.Message, 0, len(p.compressed)+1)
 	if g.preamble != "" {
 		out = append(out, types.Message{Role: "system", Content: g.preamble})
 	}
-	out = append(out, msgs...)
+	out = append(out, p.compressed...)
 
 	up := orig
 	up.Model = model
 	up.Messages = out
 	up.Stream = stream
+
+	// Extra is a map, so it is shared with the caller's request by the struct
+	// copy above. That struct is what the baseline token count and the audit
+	// record are computed from, so the rewritten tools go into a copy.
+	if len(p.tools) > 0 {
+		extra := make(map[string]json.RawMessage, len(orig.Extra))
+		for k, v := range orig.Extra {
+			extra[k] = v
+		}
+		extra["tools"] = p.tools
+		up.Extra = extra
+	}
 	return &up
 }
 
