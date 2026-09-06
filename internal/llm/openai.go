@@ -192,10 +192,12 @@ func (c *OpenAIClient) doStream(ctx context.Context, req *types.ChatCompletionRe
 			continue // tolerate keep-alives / non-JSON comments
 		}
 		for _, ch := range chunk.Choices {
-			if ch.Delta.Content == "" {
+			// A chunk with neither content nor tool calls is a role preamble or
+			// a keep-alive and carries nothing to forward.
+			if ch.Delta.Content == "" && len(ch.Delta.ToolCalls) == 0 {
 				continue
 			}
-			if err := onDelta(ch.Delta.Content); err != nil {
+			if err := onDelta(ch.Delta); err != nil {
 				return err
 			}
 		}

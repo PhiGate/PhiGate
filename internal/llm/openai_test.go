@@ -80,12 +80,62 @@ func TestOpenAIClientChatStream(t *testing.T) {
 	var got strings.Builder
 	err := c.ChatStream(context.Background(),
 		&types.ChatCompletionRequest{Model: "phi4-mini"},
-		func(d string) error { got.WriteString(d); return nil })
+		func(d types.Delta) error { got.WriteString(d.Content); return nil })
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got.String() != "Hello <V1> world" {
 		t.Fatalf("assembled deltas = %q", got.String())
+	}
+}
+
+// TestOpenAIClientForwardsToolCallChunks is the regression test for the drop.
+// Every tool-call chunk has an empty Content, and the client skipped chunks on
+// exactly that condition, so a streamed tool call never reached the gateway.
+func TestOpenAIClientForwardsToolCallChunks(t *testing.T) {
+	idx := 0
+	frag := func(name, args string) types.ChatCompletionChunk {
+		return types.ChatCompletionChunk{Choices: []types.ChunkChoice{{
+			Delta: types.Delta{ToolCalls: []types.ToolCall{{
+				Index:    &idx,
+				Function: &types.FunctionCall{Name: name, Arguments: args},
+			}}},
+		}}}
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		for _, chunk := range []types.ChatCompletionChunk{
+			frag("restart", ""), frag("", `{"host":`), frag("", `"<V1>"}`),
+		} {
+			b, _ := json.Marshal(chunk)
+			_, _ = w.Write([]byte("data: " + string(b) + "\n\n"))
+		}
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer srv.Close()
+
+	c := NewOpenAIClient("local", srv.URL+"/v1", "", WithHTTPClient(srv.Client()))
+	var seen int
+	var args strings.Builder
+	err := c.ChatStream(context.Background(),
+		&types.ChatCompletionRequest{Model: "phi4-mini"},
+		func(d types.Delta) error {
+			for _, tc := range d.ToolCalls {
+				seen++
+				if tc.Function != nil {
+					args.WriteString(tc.Function.Arguments)
+				}
+			}
+			return nil
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if seen != 3 {
+		t.Fatalf("forwarded %d tool-call fragments, want 3 — content-less chunks are being dropped", seen)
+	}
+	if args.String() != `{"host":"<V1>"}` {
+		t.Fatalf("argument fragments = %q", args.String())
 	}
 }
 

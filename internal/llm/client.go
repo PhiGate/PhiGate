@@ -10,9 +10,15 @@ import (
 	"github.com/phigate/phigate/internal/types"
 )
 
-// StreamFunc receives each content delta as it arrives from the backend.
-// Returning an error aborts the stream.
-type StreamFunc func(delta string) error
+// StreamFunc receives each delta as it arrives from the backend. Returning an
+// error aborts the stream.
+//
+// It carries the whole Delta rather than the content string it used to, because
+// a tool-call chunk has no content: its payload is in Delta.ToolCalls. Passing
+// only the string meant every such chunk was indistinguishable from an empty
+// one, and the caller below dropped it — a streamed tool call reached the client
+// as nothing at all.
+type StreamFunc func(d types.Delta) error
 
 // Client is the minimal contract the gateway needs from any model backend.
 type Client interface {

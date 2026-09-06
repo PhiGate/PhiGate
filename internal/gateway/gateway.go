@@ -22,6 +22,7 @@ import (
 type Gateway struct {
 	cfg      config.Config
 	pipeline *compressor.Pipeline
+	masker   *compressor.Masker
 	router   router.Router
 	guard    *sandbox.RuleGuard
 	ingress  *sandbox.IngressGuard
@@ -105,6 +106,12 @@ func NewWith(
 			compressor.NewRefDict(),
 			compressor.NewASTPruner(),
 		),
+		// Tool-call arguments are masked but not compressed. Drain and ASTPrune
+		// are lossy by design, and a lossy stage applied to a JSON argument
+		// string produces something the tool cannot be called with. Masking
+		// alone is reversible, so the arguments survive the round trip while
+		// still never leaving unmasked.
+		masker:     compressor.NewMaskerWith(engine),
 		router:     rtr,
 		guard:      guard,
 		ingress:    sandbox.NewIngressGuard(),

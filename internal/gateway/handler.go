@@ -100,8 +100,12 @@ func (g *Gateway) plan(r *http.Request, req *types.ChatCompletionRequest) (*requ
 	if g.cfg.IngressScan {
 		var joined strings.Builder
 		for _, m := range req.Messages {
-			joined.WriteString(m.Content)
-			joined.WriteByte('\n')
+			// Tool-call arguments are replayed model output, which is exactly
+			// where an injection carried through a prior turn would sit.
+			for _, t := range m.Texts() {
+				joined.WriteString(t)
+				joined.WriteByte('\n')
+			}
 		}
 		p.ingress = g.ingress.Inspect(joined.String())
 		for _, rule := range p.ingress.Rules {
@@ -118,9 +122,12 @@ func (g *Gateway) plan(r *http.Request, req *types.ChatCompletionRequest) (*requ
 		}
 		out := m
 		out.Content = c
+		if err := g.maskToolCalls(&out, m, p.sess); err != nil {
+			return nil, err
+		}
 		p.compressed = append(p.compressed, out)
 		if m.Role != "system" {
-			routeParts = append(routeParts, c)
+			routeParts = append(routeParts, out.Texts()...)
 		}
 	}
 
@@ -129,7 +136,7 @@ func (g *Gateway) plan(r *http.Request, req *types.ChatCompletionRequest) (*requ
 	p.baseline = tokens.EstimateMessages(g.counter, req.Contents())
 	compressedTexts := make([]string, 0, len(p.compressed))
 	for _, m := range p.compressed {
-		compressedTexts = append(compressedTexts, m.Content)
+		compressedTexts = append(compressedTexts, m.Texts()...)
 	}
 	p.promptEst = tokens.EstimateMessages(g.counter, compressedTexts)
 
@@ -177,6 +184,38 @@ func (g *Gateway) plan(r *http.Request, req *types.ChatCompletionRequest) (*requ
 	return p, nil
 }
 
+// maskToolCalls masks the arguments of every tool call on src, writing the
+// result onto dst.
+//
+// The copy is deep. ToolCall.Function is a pointer, so assigning the slice
+// element would have the masked arguments overwrite the caller's own request —
+// the struct the baseline token count and the audit record are computed from.
+//
+// Findings are noted on the same Session as message content, so a My Number in
+// an argument raises the payload's classification and the egress policy sees it.
+// That is the whole point: before this, the classifier read Content only, and a
+// tool-call turn has no Content at all.
+func (g *Gateway) maskToolCalls(dst *types.Message, src types.Message, sess *compressor.Session) error {
+	if len(src.ToolCalls) == 0 {
+		return nil
+	}
+	dst.ToolCalls = make([]types.ToolCall, len(src.ToolCalls))
+	for i, tc := range src.ToolCalls {
+		dst.ToolCalls[i] = tc
+		if tc.Function == nil {
+			continue
+		}
+		fn := *tc.Function
+		masked, err := g.masker.Process(fn.Arguments, sess)
+		if err != nil {
+			return err
+		}
+		fn.Arguments = masked
+		dst.ToolCalls[i].Function = &fn
+	}
+	return nil
+}
+
 // blockingResponse handles the non-streaming path.
 func (g *Gateway) blockingResponse(w http.ResponseWriter, r *http.Request, p *requestPlan, req *types.ChatCompletionRequest) {
 	// The cache holds answers *before* hydration, so a hit is re-hydrated with
@@ -221,6 +260,7 @@ func (g *Gateway) blockingResponse(w http.ResponseWriter, r *http.Request, p *re
 	if len(resp.Choices) > 0 {
 		g.cache.Put(p.cacheKey, cache.Entry{
 			Content:          resp.Choices[0].Message.Content,
+			ToolCalls:        resp.Choices[0].Message.ToolCalls,
 			Model:            model,
 			Route:            p.routed.Target.String(),
 			PromptTokens:     resp.Usage.PromptTokens,
@@ -265,8 +305,8 @@ func (g *Gateway) serveCached(w http.ResponseWriter, p *requestPlan, req *types.
 		Created: time.Now().Unix(),
 		Choices: []types.Choice{{
 			Index:        0,
-			Message:      types.Message{Role: "assistant", Content: e.Content},
-			FinishReason: "stop",
+			Message:      types.Message{Role: "assistant", Content: e.Content, ToolCalls: e.ToolCalls},
+			FinishReason: finishReasonFor(e),
 		}},
 	}
 	meta := g.finalize(w, p, resp, "cache")
@@ -283,14 +323,76 @@ func (g *Gateway) serveCached(w http.ResponseWriter, p *requestPlan, req *types.
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// argumentStrings pulls the string leaves out of each tool call's JSON
+// arguments so the egress guard sees a command as a command.
+//
+// The guard lexes shell syntax; handed the raw `{"cmd":"rm -rf /"}` it sees
+// JSON punctuation rather than a command line and lets it through. The command
+// lives in the string values, so those are what it must inspect. Arguments that
+// do not parse as JSON are passed through whole — a malformed argument is not a
+// reason to stop inspecting it.
+func argumentStrings(args []string) []string {
+	var out []string
+	for _, a := range args {
+		if a == "" {
+			continue
+		}
+		var v any
+		if err := json.Unmarshal([]byte(a), &v); err != nil {
+			out = append(out, a)
+			continue
+		}
+		out = append(out, jsonStrings(v)...)
+	}
+	return out
+}
+
+// jsonStrings walks a decoded JSON value and returns every string it contains,
+// keys included: a key is caller-controlled text too.
+func jsonStrings(v any) []string {
+	switch t := v.(type) {
+	case string:
+		return []string{t}
+	case []any:
+		var out []string
+		for _, e := range t {
+			out = append(out, jsonStrings(e)...)
+		}
+		return out
+	case map[string]any:
+		var out []string
+		for k, e := range t {
+			out = append(out, k)
+			out = append(out, jsonStrings(e)...)
+		}
+		return out
+	}
+	return nil
+}
+
+// finishReasonFor reports the finish reason a replayed cache entry should
+// carry. A client dispatches tool calls only when told the turn stopped to make
+// them, so replaying one as "stop" leaves the calls sitting unexecuted.
+func finishReasonFor(e cache.Entry) string {
+	if len(e.ToolCalls) > 0 {
+		return "tool_calls"
+	}
+	return "stop"
+}
+
 // finalize hydrates each choice, applies the enumeration and egress guards,
 // sets the response headers, and returns the metadata block.
 func (g *Gateway) finalize(w http.ResponseWriter, p *requestPlan, resp *types.ChatCompletionResponse, backend string) *types.Meta {
 	var blockedRule, severity string
 
 	for i := range resp.Choices {
-		masked := resp.Choices[i].Message.Content
-		hydrated, report := p.sess.Dict.HydrateReport(masked)
+		msg := &resp.Choices[i].Message
+
+		// Content and tool-call arguments are one body of text for both checks
+		// below. The enumeration count must be over their union — measuring
+		// them separately lets an answer stay under the threshold in each while
+		// reciting the dictionary across both.
+		_, report := p.sess.Dict.HydrateReport(strings.Join(msg.Texts(), "\n"))
 
 		// Dictionary enumeration: an answer that resolves most of a large
 		// dictionary is reciting it rather than using it. Serving that would
@@ -298,14 +400,28 @@ func (g *Gateway) finalize(w http.ResponseWriter, p *requestPlan, resp *types.Ch
 		if g.cfg.Enumeration.Exceeded(report.Distinct, p.sess.Dict.Len()) {
 			p.event.EnumerationStop = true
 			p.event.EgressBlocked = true
-			resp.Choices[i].Message.Content = enumerationNotice()
+			msg.Content = enumerationNotice()
+			msg.ToolCalls = nil
 			resp.Choices[i].FinishReason = "content_filter"
 			blockedRule, severity = "dictionary_enumeration", "block"
 			g.metrics.blocked.Inc("dictionary_enumeration", "block")
 			continue
 		}
 
-		v := g.guard.Inspect(hydrated)
+		hydrated := p.sess.Dict.Hydrate(msg.Content)
+		hydratedArgs := make([]string, len(msg.ToolCalls))
+		for j, tc := range msg.ToolCalls {
+			if tc.Function != nil {
+				hydratedArgs[j] = p.sess.Dict.Hydrate(tc.Function.Arguments)
+			}
+		}
+
+		// The guard inspects the arguments too. A tool whose job is to run a
+		// command carries that command in its arguments, not in the prose, so
+		// inspecting Content alone would wave through the one case the egress
+		// guard exists for.
+		inspect := append([]string{hydrated}, argumentStrings(hydratedArgs)...)
+		v := g.guard.Inspect(strings.Join(inspect, "\n"))
 		for _, f := range v.Findings {
 			p.event.EgressFindings = append(p.event.EgressFindings, f.Rule+"="+f.Severity)
 		}
@@ -315,7 +431,10 @@ func (g *Gateway) finalize(w http.ResponseWriter, p *requestPlan, resp *types.Ch
 			p.event.EgressBlocked = true
 			p.event.EgressRule = v.Rule
 			p.event.EgressSeverity = v.Severity.String()
-			resp.Choices[i].Message.Content = blockedNotice(v)
+			msg.Content = blockedNotice(v)
+			// Withholding the prose while still handing back the call it
+			// described would defeat the block: an agent executes the call.
+			msg.ToolCalls = nil
 			resp.Choices[i].FinishReason = "content_filter"
 			continue
 		}
@@ -332,7 +451,14 @@ func (g *Gateway) finalize(w http.ResponseWriter, p *requestPlan, resp *types.Ch
 		if p.ingress.Suspicious {
 			hydrated = sandbox.InjectionNotice(p.ingress) + "\n\n" + hydrated
 		}
-		resp.Choices[i].Message.Content = hydrated
+		msg.Content = hydrated
+		for j := range msg.ToolCalls {
+			if msg.ToolCalls[j].Function != nil {
+				fn := *msg.ToolCalls[j].Function
+				fn.Arguments = hydratedArgs[j]
+				msg.ToolCalls[j].Function = &fn
+			}
+		}
 	}
 
 	meta := g.buildMeta(p, backend, blockedRule, severity)
@@ -489,10 +615,15 @@ func enumerationNotice() string {
 		"masked values rather than answer the question."
 }
 
+// answerText is every string the model produced, for estimating completion
+// tokens when the provider reports no usage block. Tool-call arguments are
+// billed like any other completion text, so they are counted here.
 func answerText(resp *types.ChatCompletionResponse) string {
 	var b strings.Builder
 	for _, c := range resp.Choices {
-		b.WriteString(c.Message.Content)
+		for _, t := range c.Message.Texts() {
+			b.WriteString(t)
+		}
 	}
 	return b.String()
 }

@@ -13,8 +13,22 @@
 // failure mode a proxy can have, because nothing surfaces it.
 //
 // The structs here therefore keep every unrecognised field verbatim in Extra
-// and re-emit it. PhiGate rewrites message content and the model name; it
-// touches nothing else.
+// and re-emit it. PhiGate rewrites message content, tool-call arguments and the
+// model name; it touches nothing else.
+//
+// # Why tool calls are modelled rather than passed through
+//
+// Verbatim passthrough fixed silent dropping and introduced a worse problem.
+// An assistant turn that invokes a tool carries no `content` at all — its
+// payload lives in `tool_calls[].function.arguments`, a JSON string. While that
+// rode along in Extra it went upstream unmasked, and the egress classifier,
+// which reads Content, never saw it. A gateway whose headline guarantee is that
+// no personal datum leaves unmasked cannot have a field that bypasses masking
+// entirely, so tool calls are modelled here and compressed like any other text.
+//
+// Unknown fields *inside* a tool call still ride along in its own Extra, so
+// promoting these two levels out of the passthrough does not reintroduce the
+// dropping problem.
 package types
 
 import (
@@ -29,18 +43,150 @@ var knownRequestFields = map[string]bool{
 	"stream": true, "max_tokens": true,
 }
 
+// FunctionCall is the invoked function of a tool call.
+//
+// Arguments is a JSON *string* — the provider's own encoding, not a nested
+// object — and it is the field that carries caller data, so it is what the
+// compression pipeline masks and hydrates.
+type FunctionCall struct {
+	Name      string `json:"name,omitempty"`
+	Arguments string `json:"arguments,omitempty"`
+
+	// Extra preserves any field the provider adds inside `function`.
+	Extra map[string]json.RawMessage `json:"-"`
+}
+
+// UnmarshalJSON parses the known fields and captures the rest.
+func (f *FunctionCall) UnmarshalJSON(b []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return err
+	}
+	f.Extra = map[string]json.RawMessage{}
+	for k, v := range raw {
+		switch k {
+		case "name":
+			_ = json.Unmarshal(v, &f.Name)
+		case "arguments":
+			_ = json.Unmarshal(v, &f.Arguments)
+		default:
+			f.Extra[k] = v
+		}
+	}
+	return nil
+}
+
+// MarshalJSON re-emits the function with Extra restored.
+func (f FunctionCall) MarshalJSON() ([]byte, error) {
+	out := map[string]json.RawMessage{}
+	for k, v := range f.Extra {
+		out[k] = v
+	}
+	if f.Name != "" {
+		n, _ := json.Marshal(f.Name)
+		out["name"] = n
+	}
+	// Arguments is emitted whenever the call has a function at all: an empty
+	// string is what a streaming delta legitimately carries before any argument
+	// text has arrived, and dropping it changes the shape the client sees.
+	a, err := json.Marshal(f.Arguments)
+	if err != nil {
+		return nil, err
+	}
+	out["arguments"] = a
+	return json.Marshal(out)
+}
+
+// ToolCall is one function invocation requested by the model, or replayed by
+// the client in a later turn.
+//
+// Index is present only on streaming deltas, where it identifies which call a
+// fragment belongs to; a pointer distinguishes "index 0" from "absent".
+type ToolCall struct {
+	ID       string        `json:"id,omitempty"`
+	Type     string        `json:"type,omitempty"`
+	Index    *int          `json:"index,omitempty"`
+	Function *FunctionCall `json:"function,omitempty"`
+
+	// Extra preserves any field the provider adds alongside these.
+	Extra map[string]json.RawMessage `json:"-"`
+}
+
+// UnmarshalJSON parses the known fields and captures the rest.
+func (t *ToolCall) UnmarshalJSON(b []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return err
+	}
+	t.Extra = map[string]json.RawMessage{}
+	for k, v := range raw {
+		switch k {
+		case "id":
+			_ = json.Unmarshal(v, &t.ID)
+		case "type":
+			_ = json.Unmarshal(v, &t.Type)
+		case "index":
+			_ = json.Unmarshal(v, &t.Index)
+		case "function":
+			var fn FunctionCall
+			if err := json.Unmarshal(v, &fn); err != nil {
+				return fmt.Errorf("tool_calls[].function: %w", err)
+			}
+			t.Function = &fn
+		default:
+			t.Extra[k] = v
+		}
+	}
+	return nil
+}
+
+// MarshalJSON re-emits the tool call with Extra restored.
+func (t ToolCall) MarshalJSON() ([]byte, error) {
+	out := map[string]json.RawMessage{}
+	for k, v := range t.Extra {
+		out[k] = v
+	}
+	for k, s := range map[string]string{"id": t.ID, "type": t.Type} {
+		if s != "" {
+			b, _ := json.Marshal(s)
+			out[k] = b
+		}
+	}
+	if t.Index != nil {
+		b, _ := json.Marshal(*t.Index)
+		out["index"] = b
+	}
+	if t.Function != nil {
+		b, err := json.Marshal(t.Function)
+		if err != nil {
+			return nil, err
+		}
+		out["function"] = b
+	}
+	return json.Marshal(out)
+}
+
 // Message is a single chat turn.
 //
 // Content carries the flattened text, which is what the compression pipeline
 // operates on. Raw preserves the original JSON so multi-part messages — text
 // plus image_url, the shape used by vision requests — survive the round trip
 // with their non-text parts untouched.
+//
+// ToolCalls is modelled for the reason given in the package doc: its arguments
+// carry caller data and must not bypass masking.
 type Message struct {
-	Role    string          `json:"role"`
-	Content string          `json:"content"`
-	Name    string          `json:"name,omitempty"`
-	Raw     json.RawMessage `json:"-"`
-	Extra   map[string]json.RawMessage
+	Role      string          `json:"role"`
+	Content   string          `json:"content"`
+	Name      string          `json:"name,omitempty"`
+	ToolCalls []ToolCall      `json:"tool_calls,omitempty"`
+	Raw       json.RawMessage `json:"-"`
+	Extra     map[string]json.RawMessage
+
+	// contentNull records that the turn arrived with `"content": null`, which
+	// is the shape an assistant tool-call turn uses. Re-emitting it as `""`
+	// makes some providers reject the replayed conversation.
+	contentNull bool
 }
 
 // UnmarshalJSON accepts both string content and the content-array form.
@@ -58,11 +204,23 @@ func (m *Message) UnmarshalJSON(b []byte) error {
 			_ = json.Unmarshal(v, &m.Name)
 		case "content":
 			m.Raw = append(json.RawMessage(nil), v...)
+		case "tool_calls":
+			if err := json.Unmarshal(v, &m.ToolCalls); err != nil {
+				return fmt.Errorf("tool_calls: %w", err)
+			}
 		default:
 			m.Extra[k] = v
 		}
 	}
 	if len(m.Raw) == 0 {
+		return nil
+	}
+
+	// A tool-call turn carries `"content": null`. Record that so the turn is
+	// re-emitted in the shape it arrived in.
+	if string(m.Raw) == "null" {
+		m.contentNull = true
+		m.Raw = nil
 		return nil
 	}
 
@@ -108,8 +266,19 @@ func (m Message) MarshalJSON() ([]byte, error) {
 		n, _ := json.Marshal(m.Name)
 		out["name"] = n
 	}
+	if len(m.ToolCalls) > 0 {
+		tc, err := json.Marshal(m.ToolCalls)
+		if err != nil {
+			return nil, err
+		}
+		out["tool_calls"] = tc
+	}
 
 	if len(m.Raw) == 0 {
+		if m.contentNull && m.Content == "" {
+			out["content"] = json.RawMessage("null")
+			return json.Marshal(out)
+		}
 		c, err := json.Marshal(m.Content)
 		if err != nil {
 			return nil, err
@@ -220,11 +389,31 @@ func (r ChatCompletionRequest) MarshalJSON() ([]byte, error) {
 	return json.Marshal(out)
 }
 
+// Texts returns every caller-supplied string in the message: its content, then
+// the arguments of each tool call.
+//
+// Anything this method omits is text that escapes token accounting, the ingress
+// scan and the cache key, so a field that carries caller data belongs here.
+func (m Message) Texts() []string {
+	out := make([]string, 0, 1+len(m.ToolCalls))
+	out = append(out, m.Content)
+	for _, tc := range m.ToolCalls {
+		if tc.Function != nil {
+			out = append(out, tc.Function.Arguments)
+		}
+	}
+	return out
+}
+
 // Contents returns the text of every message, for compression and hashing.
+//
+// Tool-call arguments are included: they are part of what is sent upstream, so
+// leaving them out understated the baseline and let two requests differing only
+// in their arguments collide on one cache key.
 func (r ChatCompletionRequest) Contents() []string {
 	out := make([]string, 0, len(r.Messages))
 	for _, m := range r.Messages {
-		out = append(out, m.Content)
+		out = append(out, m.Texts()...)
 	}
 	return out
 }
@@ -275,9 +464,15 @@ type Meta struct {
 }
 
 // Delta is the incremental content carried by a streaming chunk.
+//
+// ToolCalls is modelled for the same reason as on Message, and for a second
+// one: the streaming client dropped every chunk whose Content was empty, which
+// is every tool-call chunk, so a streamed tool call reached the caller as
+// nothing at all.
 type Delta struct {
-	Role    string `json:"role,omitempty"`
-	Content string `json:"content,omitempty"`
+	Role      string     `json:"role,omitempty"`
+	Content   string     `json:"content,omitempty"`
+	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
 }
 
 // ChunkChoice is one choice within a streaming chunk.

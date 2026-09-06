@@ -35,6 +35,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/phigate/phigate/internal/types"
 )
 
 // Store is the seam PhiGate's cache tiers plug into.
@@ -63,6 +65,13 @@ type Store interface {
 type Entry struct {
 	// Content is the answer as the model produced it, with placeholders intact.
 	Content string
+	// ToolCalls are the calls the answer requested, arguments still masked.
+	//
+	// They are stored for the same reason Content is, and under the same
+	// obligation: pre-hydration only. Omitting them did not merely lose cache
+	// value — a tool-call answer has no Content, so a hit replayed it as an
+	// empty message and the caller silently lost the call.
+	ToolCalls []types.ToolCall
 	// Model is the upstream model that produced it.
 	Model string
 	// Route records whether it came from the local or cloud backend.
@@ -174,7 +183,9 @@ func (c *Cache) Get(key string) (Entry, bool) {
 // Put stores an answer. Callers must pass the pre-hydration text; storing
 // hydrated content would leak one session's values to another.
 func (c *Cache) Put(key string, e Entry) {
-	if !c.enabled || e.Content == "" {
+	// An answer that is only tool calls has no Content, so emptiness alone does
+	// not mean there is nothing worth storing.
+	if !c.enabled || (e.Content == "" && len(e.ToolCalls) == 0) {
 		return
 	}
 	e.stored = time.Now()
