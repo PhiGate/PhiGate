@@ -105,15 +105,14 @@ real money, so it can only be run by someone with both. See the bill first:
 ./bin/phigate-eval eval -cases eval/cases.json -dry-run -repeat 5
 ```
 
-There are **two** questions here, and one number cannot answer both. Run each
-separately, because publishing the second under the first's heading would be
-wrong.
+**There are two questions here, and one number cannot answer both.** The
+harness runs either, and which one you want changes how you configure the
+gateway before running it.
 
-#### (a) Does the pipeline itself degrade answers?
-
-Both arms must use the same model, or the result includes the model change.
-Point the local backend at the cloud one so routing cannot change which model
-answers, and the only variable left is compress → anonymise → hydrate:
+**(a) Does the pipeline itself degrade answers?** Both arms have to use the same
+model, or the result includes a model change rather than measuring compression.
+Point the local backend at the cloud one, so routing cannot decide which model
+answers and the only variable left is compress → anonymise → hydrate:
 
 ```bash
 PHIGATE_LOCAL_BASE_URL=https://api.openai.com/v1 \
@@ -124,35 +123,34 @@ PHIGATE_LOCAL_API_KEY=$OPENAI_API_KEY \
     -baseline https://api.openai.com/v1 -baseline-key $OPENAI_API_KEY
 ```
 
-| | mean score (0–10) | spread |
-|---|---:|---:|
-| raw to the cloud model | *not yet measured* | |
-| through PhiGate, same model | *not yet measured* | |
+**(b) What quality does a real deployment get?** The same command without those
+overrides, so the router does what it normally does and some cases are answered
+by the local SLM. That is the number a buyer cares about, and it measures the
+pipeline *and* the routing together. Reporting it as an answer to (a) would be
+wrong, which is why the two are separated here.
 
-#### (b) What quality does a real deployment get?
+`-baseline-provider` selects the dialect of the raw arm — `openai`, `azure`,
+`anthropic` or `bedrock` — so the comparison is against whatever you actually
+use today.
 
-The same command without the overrides, so the router does what it normally
-does and some cases are answered by the local SLM. This is the number a buyer
-cares about, and it measures the pipeline *and* the routing together.
+**When these numbers are published, they will carry three caveats**, and it is
+worth knowing them before you run it yourself:
 
-| | mean score (0–10) | spread | cases routed local |
-|---|---:|---:|---:|
-| raw to the cloud model | *not yet measured* | | |
-| through PhiGate, as deployed | *not yet measured* | | 5 of 8 |
+- Unlike the compression table above, they will **not** come from a third-party
+  corpus. `eval/cases.json` holds eight cases written by this project, chosen to
+  include the payloads PhiGate finds hardest — high placeholder density,
+  AST-pruned code, Japanese text. That is a sanity check, not an independent
+  benchmark.
+- A judge model is not deterministic, so a single score per case is a sample.
+  `-repeat` runs each case several times and reports the spread; a delta smaller
+  than the spread is noise, not a finding.
+- The judge shares a model family with the answers, which biases it. The same
+  judge scores both arms, so the bias largely cancels in the *delta*, which is
+  the figure that matters.
 
-#### Read these with their caveats
-
-Unlike the compression table above, these numbers would **not** come from a
-third-party corpus. `eval/cases.json` holds **8 cases written by this project**,
-chosen to include the payloads PhiGate finds hardest — high placeholder density,
-AST-pruned code, Japanese text. That is a sanity check, not an independent
-benchmark, and it is why the harness takes `-repeat`: a judge model is not
-deterministic, so a single score per case is a sample and a delta smaller than
-the spread is noise rather than a finding.
-
-The judge is the same model family as the answers, which biases it — but the
-same judge scores both arms, so the bias largely cancels in the *delta*, which
-is the figure that matters.
+Savings are read from the first run of each case, on a cold cache. Later repeats
+are exact cache hits that save the whole baseline, and taking one of those would
+make the headline improve the more times you ran it.
 
 The number that should convince your organisation is the one measured on your
 own ticket history. Extend the file and run it.
@@ -163,16 +161,20 @@ own ticket history. Extend the file and run it.
 
 ```
 POST /v1/chat/completions
-  → authenticate (API key, per-tenant)
+  → authenticate, resolve the tenant       per-tenant policy and rule set
+  → check the tenant's token budget        internal/gateway    ← 429 when spent
   → screen for prompt injection            internal/sandbox  (ingress)
   → compress + anonymize                   internal/compressor + internal/redact
+      message content, tool-call arguments, and tool descriptions
   → classify what was found                secret / pii / network / identifier / …
   → EGRESS POLICY decides where it may go  internal/policy     ← binding
-  → template cache lookup                  internal/cache      ← zero-token hit
+  → template cache lookup                  internal/cache      ← keyed on shape
   → route local vs cloud                   internal/router     ← advisory
-  → dispatch (retry + circuit breaker)     internal/llm        OpenAI | Azure OpenAI
+  → dispatch (retry + circuit breaker)     internal/llm
+      OpenAI | Azure OpenAI | Anthropic | Amazon Bedrock
   → hydrate back to real values            + enumeration guard
   → inspect the answer                     internal/sandbox    (egress)
+      prose *and* tool-call arguments
   → account for it                         internal/tokens     tokens + money
   → audit                                  internal/audit      structured JSON
 ```
@@ -570,21 +572,22 @@ make docker
 
 ```
 cmd/phigate/          server entrypoint, graceful shutdown
-cmd/phigate-eval/     bench / eval / leak measurement harness
+cmd/phigate-eval/     bench / cache / eval / leak measurement harness
 internal/
   redact/             detection engine, rule packs, leak corpus  ← the privacy guarantee
   compressor/         Masker → Drain → RefDict → ASTPrune + dictionary
   policy/             egress policy: classification decides destination
   router/             local-vs-cloud cost heuristic (advisory)
-  cache/              template cache — pre-hydration, hash-keyed
+  cache/              template cache — pre-hydration, keyed on payload shape
   sandbox/            egress guard (shell lexer, severity tiers) + ingress guard
-  llm/                OpenAI + Azure clients, retry, circuit breaker
+  llm/                OpenAI, Azure, Anthropic and Bedrock clients (SigV4),
+                      retry, circuit breaker
   tokens/             token estimator, price book, savings ledger
   session/            TTL'd multi-turn dictionary store
   audit/              structured JSON audit records
   metrics/            Prometheus exposition, dependency-free
   gateway/            HTTP surface, auth, rate limiting, dashboard
-  config/             env configuration, fails loudly on bad values
+  config/             file + env configuration, per-tenant, reload on SIGHUP
 deploy/helm/phigate/  production Helm chart
 eval/cases.json       golden quality cases
 ee/                   Enterprise Edition — separate Go module, separate licence
@@ -610,9 +613,17 @@ ever changes.
 | Non-production use | free | free |
 | Dependencies | tree-sitter only | its own, isolated in `ee/go.mod` |
 
-EE is scale and operations — durable quotas, clustering, distributed caching,
-immutable audit storage, the control plane. It is not where the privacy
-guarantees live. See [ee/README.md](ee/README.md), and
+EE is scale and operations, not privacy. Three of its four seams are
+implemented: a tamper-evident audit chain (`ee/audit/worm`), a durable
+per-tenant token ledger (`ee/tokens/durable`), and Japanese name detection that
+composes with — never replaces — CE's regex engine (`ee/redact/slm`). A semantic
+cache tier is deliberately not built; the measurement that decided that is in
+[ee/README.md](ee/README.md).
+
+The privacy guarantees stay in CE. Every control in the table at the top of this
+file is Community Edition, and EE's name detector can only ever find *more* than
+CE's engine — CE's own leak corpus is run through it, against an adversarial
+recognizer, as a test. See [ee/README.md](ee/README.md), and
 [ee/LICENSING-FAQ.md](ee/LICENSING-FAQ.md) for what "production" means, with
 worked examples. Evaluating EE against real production data is free on request.
 
