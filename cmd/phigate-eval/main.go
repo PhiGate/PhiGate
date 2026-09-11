@@ -768,17 +768,6 @@ func corpusFiles(dir string) ([]string, error) {
 	return out, err
 }
 
-func atoiHeader(s string) int {
-	n := 0
-	for _, c := range s {
-		if c < '0' || c > '9' {
-			break
-		}
-		n = n*10 + int(c-'0')
-	}
-	return n
-}
-
 func truncate(s string, n int) string {
 	r := []rune(s)
 	if len(r) <= n {

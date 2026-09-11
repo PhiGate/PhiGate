@@ -22,7 +22,7 @@ type probeStore struct {
 
 func (p *probeStore) GetProbe(pr cache.Probe) (cache.Entry, bool) {
 	p.probes = append(p.probes, pr)
-	return p.Store.Get(pr.Key)
+	return p.Get(pr.Key)
 }
 
 // tenantLedger records what it is asked to account for.
