@@ -62,12 +62,40 @@ type PriceBook struct {
 // Totals.UnpricedRequests and surfaced by /v1/phigate/stats, so a Bedrock
 // deployment can see that it needs to supply a book rather than quietly
 // believing a figure.
+// Rates verified against each vendor's published pricing on 2026-09-12.
 var DefaultPrices = []Price{
+	// OpenAI, first-party list rates. Enumerated by generation for the same
+	// reason as the Claude block below: "gpt-5" is a prefix of "gpt-5.6-sol",
+	// so a generation missing from this table does not go unpriced — it
+	// silently inherits the rate of a model four releases older, at a fifth of
+	// the true input cost.
+	{Model: "gpt-6-astra", InputPerMillion: 10.00, OutputPerMillion: 50.00},
+	{Model: "gpt-5.6-sol", InputPerMillion: 4.00, OutputPerMillion: 20.00},
+	{Model: "gpt-5.6-terra", InputPerMillion: 2.00, OutputPerMillion: 12.00},
+	{Model: "gpt-5.6-luna", InputPerMillion: 0.20, OutputPerMillion: 1.20},
+	{Model: "gpt-5.5-pro", InputPerMillion: 30.00, OutputPerMillion: 180.00},
+	{Model: "gpt-5.5", InputPerMillion: 5.00, OutputPerMillion: 30.00},
+	{Model: "gpt-5.4-pro", InputPerMillion: 30.00, OutputPerMillion: 180.00},
+	{Model: "gpt-5.4-mini", InputPerMillion: 0.75, OutputPerMillion: 4.50},
+	{Model: "gpt-5.4-nano", InputPerMillion: 0.20, OutputPerMillion: 1.25},
+	{Model: "gpt-5.4", InputPerMillion: 2.50, OutputPerMillion: 15.00},
+	{Model: "gpt-5.2-pro", InputPerMillion: 21.00, OutputPerMillion: 168.00},
+	{Model: "gpt-5.2", InputPerMillion: 1.75, OutputPerMillion: 14.00},
+	{Model: "gpt-5.1", InputPerMillion: 1.25, OutputPerMillion: 10.00},
+	{Model: "gpt-5-pro", InputPerMillion: 15.00, OutputPerMillion: 120.00},
+	{Model: "gpt-5-mini", InputPerMillion: 0.25, OutputPerMillion: 2.00},
+	{Model: "gpt-5-nano", InputPerMillion: 0.05, OutputPerMillion: 0.40},
+	{Model: "gpt-5", InputPerMillion: 1.25, OutputPerMillion: 10.00},
+	{Model: "gpt-4.1-nano", InputPerMillion: 0.10, OutputPerMillion: 0.40},
 	{Model: "gpt-4o-mini", InputPerMillion: 0.15, OutputPerMillion: 0.60},
 	{Model: "gpt-4o", InputPerMillion: 2.50, OutputPerMillion: 10.00},
 	{Model: "gpt-4.1-mini", InputPerMillion: 0.40, OutputPerMillion: 1.60},
 	{Model: "gpt-4.1", InputPerMillion: 2.00, OutputPerMillion: 8.00},
+	{Model: "o3-pro", InputPerMillion: 20.00, OutputPerMillion: 80.00},
 	{Model: "o3-mini", InputPerMillion: 1.10, OutputPerMillion: 4.40},
+	{Model: "o3", InputPerMillion: 2.00, OutputPerMillion: 8.00},
+	{Model: "o1-pro", InputPerMillion: 150.00, OutputPerMillion: 600.00},
+	{Model: "o1", InputPerMillion: 15.00, OutputPerMillion: 60.00},
 	// Anthropic, first-party list rates. Entries are matched longest-name
 	// first, which is what keeps "claude-opus-4-8" from inheriting the older
 	// "claude-opus-4" rate — a 3x overstatement, and the reason the specific
@@ -86,6 +114,25 @@ var DefaultPrices = []Price{
 	{Model: "claude-3-5-sonnet", InputPerMillion: 3.00, OutputPerMillion: 15.00},
 	{Model: "claude-sonnet-4", InputPerMillion: 3.00, OutputPerMillion: 15.00},
 	{Model: "claude-opus-4", InputPerMillion: 15.00, OutputPerMillion: 75.00},
+	// Google, first-party list rates.
+	//
+	// Two caveats a finance team will notice before you do. The 3.6/3.7/3.8
+	// Flash rate below is *introductory* and doubles to $1.50/$7.50 on
+	// 2027-01-01 — a deployment on those models will see its reported spend
+	// halve against reality overnight unless this table is refreshed. And
+	// Gemini bills two context tiers: 3.1 Pro and 2.5 Pro charge roughly double
+	// above a 200k-token prompt. PhiGate has no context-tier logic, so these
+	// are the under-200k rates and a long-prompt deployment under-reports.
+	// Supply a book at the higher rate if that is the traffic you actually send.
+	{Model: "gemini-3.8-flash", InputPerMillion: 0.75, OutputPerMillion: 3.75},
+	{Model: "gemini-3.7-flash", InputPerMillion: 0.75, OutputPerMillion: 3.75},
+	{Model: "gemini-3.6-flash", InputPerMillion: 0.75, OutputPerMillion: 3.75},
+	{Model: "gemini-3.5-flash-lite", InputPerMillion: 0.30, OutputPerMillion: 2.50},
+	{Model: "gemini-3.5-flash", InputPerMillion: 1.50, OutputPerMillion: 9.00},
+	{Model: "gemini-3.1-pro-preview", InputPerMillion: 2.00, OutputPerMillion: 12.00},
+	{Model: "gemini-2.5-pro", InputPerMillion: 1.25, OutputPerMillion: 10.00},
+	{Model: "gemini-2.5-flash-lite", InputPerMillion: 0.10, OutputPerMillion: 0.40},
+	{Model: "gemini-2.5-flash", InputPerMillion: 0.30, OutputPerMillion: 2.50},
 	{Model: "gemini-2.0-flash", InputPerMillion: 0.10, OutputPerMillion: 0.40},
 	{Model: "gemini-1.5-pro", InputPerMillion: 1.25, OutputPerMillion: 5.00},
 }
