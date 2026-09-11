@@ -296,6 +296,53 @@ client = OpenAI(base_url="http://localhost:8080/v1", api_key="my-client-key")
 終えてから初めて適用するため、不正な編集をしても稼働中のゲートウェイはそのまま
 です。
 
+<details>
+<summary><b>バックエンド</b> — OpenAI 互換 / Azure OpenAI</summary>
+
+| 変数 | 既定値 | 用途 |
+|---|---|---|
+| `PHIGATE_LOCAL_PROVIDER` | `openai` | `openai` \| `azure` \| `anthropic` \| `bedrock` |
+| `PHIGATE_LOCAL_BASE_URL` | `http://localhost:11434/v1` | Ollama / vLLM / llama.cpp |
+| `PHIGATE_LOCAL_MODEL` | `phi4-mini` | `ollama list` の表示と**完全に一致**させること |
+| `PHIGATE_CLOUD_PROVIDER` | `openai` | `azure` / `anthropic` / `bedrock` |
+| `PHIGATE_CLOUD_BASE_URL` | `https://api.openai.com/v1` | Azure の場合はリソースのルート |
+| `PHIGATE_CLOUD_MODEL` | `gpt-4o` | |
+| `PHIGATE_CLOUD_API_KEY` | (`OPENAI_API_KEY`) | |
+| `PHIGATE_CLOUD_API_VERSION` | `2024-10-21` | Azure のみ |
+| `PHIGATE_CLOUD_DEPLOYMENT` | (モデル名) | Azure のデプロイ名。Bedrock では推論プロファイル ARN |
+| `PHIGATE_CLOUD_REGION` | (`AWS_REGION`) | Bedrock のみ |
+| `PHIGATE_CLOUD_ACCESS_KEY_ID` | (`AWS_ACCESS_KEY_ID`) | Bedrock のみ |
+| `PHIGATE_CLOUD_SECRET_ACCESS_KEY` | (`AWS_SECRET_ACCESS_KEY`) | Bedrock のみ |
+| `PHIGATE_CLOUD_SESSION_TOKEN` | (`AWS_SESSION_TOKEN`) | Bedrock のみ。一時認証情報用 |
+
+ローカルモデルの差し替えは**環境変数だけ**で完結します。PhiGate にモデル固有の
+コードは一切なく、`phi4-mini` は既定値の文字列にすぎません。
+
+**Claude（第一者 API / Bedrock 経由）。** どちらも OpenAI のワイヤ形式を話さない
+ため、ベース URL の差し替えではなく PhiGate が変換する「方言」として実装されて
+います。システムプロンプトはトップレベルのフィールドへ移り、`max_tokens` が必須に
+なり、コンテンツは型付きブロックの配列になります。ツール呼び出しも双方向で変換
+されるため、他のバックエンドと同様にマスキングとガードの対象になります。
+
+```json
+{ "cloud": { "provider": "anthropic", "model": "claude-opus-5",
+             "base_url": "https://api.anthropic.com", "api_key": "sk-ant-..." } }
+```
+
+Bedrock のリクエストは SigV4 で署名されます。認証情報はバックエンド設定または
+標準の `AWS_*` 環境変数から取得しますが、**AWS の認証情報チェーン全体（インスタンス
+メタデータ、SSO、プロファイル、AssumeRole）は未実装**です。リージョンや認証情報を
+欠いた Bedrock バックエンドは、最初のリクエスト時ではなく起動時に失敗します。
+Bedrock の**ストリーミングは非対応**です（イベントストリームが SSE ではなくバイナリ
+フレーミングのため）。非ストリーミングのリクエストか、第一者 API を使ってください。
+
+</details>
+
+**国産 LLM・デジタル庁「源内」採択モデル。** PLaMo・tsuzumi 2・ELYZA・Sarashina
+など、源内で採択された 7 モデルへの接続方法は
+[日本の国産モデル接続ガイド](docs/japan-models.md) にまとめています。接続設定の
+記載であり、動作検証済みという意味ではない点にご注意ください。
+
 その他の設定項目は [English README](README.md#configuration) を参照してください。
 `phigate -rules` で、実際に有効な検出規則と分類をすべて表示できます。
 

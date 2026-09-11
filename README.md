@@ -473,6 +473,13 @@ the first request. Bedrock **streaming is not supported**: its event stream is a
 binary framing rather than SSE, and the backend says so plainly instead of
 pretending. Use a non-streaming request, or the first-party API.
 
+**Changing the model needs no code.** There is nothing model-specific in this
+repository — `phi4-mini` is a default string, not an integration. For the seven
+domestic models Japan's Digital Agency selected for the 源内 (Gennai) government
+platform — PLaMo, tsuzumi 2, ELYZA, Sarashina and three proprietary others — see
+[docs/japan-models.md](docs/japan-models.md), which documents how to connect each
+one and is explicit that connecting is not the same as having validated it.
+
 </details>
 
 <details>
