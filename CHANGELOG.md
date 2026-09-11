@@ -12,6 +12,101 @@ read.
 
 ## [Unreleased]
 
+## [0.4.1] — 2026-09-12
+
+**If you report spend from the shipped example price book, the Claude Opus 4.x
+figures it produced were three times too high.** That is the reason this release
+exists; everything else in it is secondary.
+
+The cause is worth stating plainly because it is not a typo. The book matches
+longest-name-first so that a dated snapshot inherits its generation's rate
+without its own entry — and the same rule means a family name absorbs every
+later generation that shares its prefix. `claude-opus-4` was in the file at the
+Opus 4 rate and none of the 4.x generations were, so every `claude-opus-4-8`
+request matched it. `DefaultPrices` has enumerated generations against exactly
+this since 0.4.0, and a test has guarded it. The example file had neither.
+
+`make guarantees` grows a cost check, and that matters more than the fix. The
+target has always described itself as running the tests behind PhiGate's
+"security **and cost** claims", and every check in it was a security check — the
+cost half was an assertion the reader was invited to take on trust. This release
+is what that trust was worth. Six tests now back it: the three vendor families
+against prefix absorption, dated-snapshot inheritance, the partner-platform
+exclusion, and the shipped example file itself, loaded and asserted rather than
+hand-checked.
+
+### Fixed — what the cost figures say
+
+- **The shipped example price book reported Claude Opus 4.x traffic at three
+  times its cost.** `deploy/price-book.example.json` listed `claude-opus-4` at
+  ¥2250/¥11250 and none of the 4.x generations. Because the book matches
+  longest-name-first, `claude-opus-4-8`, `-4-7` and `-4-6` all matched that
+  entry and were billed against the Opus 4 rate — ¥2250/¥11250 against a true
+  ¥750/¥3750. Opus 5, Sonnet 5 and Haiku 4.5 had no entry at all and went
+  unpriced, which at least fails visibly.
+
+  This is the exact hazard `DefaultPrices` enumerates generations to avoid, and
+  which `TestCurrentClaudeModelsAreNotMispricedByAnOlderPrefix` has guarded in
+  the built-in table since 0.4.0. The example file never got the same treatment,
+  because a hand-checked JSON file is not checked. It is now loaded and asserted
+  by `TestShippedExampleBookDoesNotMisprice`.
+
+  The file also now records its FX assumption (JPY 150 = USD 1, verified
+  2026-09-12). A price book denominated in yen with no recorded rate or date
+  cannot be reconciled against a USD invoice.
+
+### Changed
+
+- **Refreshed the built-in price table for OpenAI and Google**, verified against
+  each vendor's published pricing on 2026-09-12. The existing entries were not
+  *wrong* — `gpt-4o` and `gpt-4.1` still carry the rates they always did — they
+  were incomplete: everything from the GPT-5 generation onward, and every Gemini
+  after 2.0, matched no entry and landed in `UnpricedRequests`. Added the GPT-6
+  and GPT-5.x families, the o-series, and Gemini 2.5 through 3.8.
+
+  OpenAI's naming makes the prefix hazard sharper than Anthropic's: `gpt-5` is
+  itself a priced model at $1.25/$10 *and* a prefix of every 5.x release, so a
+  generation missing from the table is not unpriced-and-visible but priced at a
+  fifth of its input cost. Two new tests pin the generations for OpenAI and
+  Gemini the way the Claude one already did.
+
+  Two figures carry a known expiry, both noted in the table: the Gemini 3.6/3.7/
+  3.8 Flash rate is introductory and doubles on 2027-01-01, and Gemini's
+  above-200k-token context tier is not modelled at all, so long-prompt
+  deployments on 3.1 Pro or 2.5 Pro under-report.
+
+  The Anthropic block needed no change — it was already current.
+
+### Added
+
+- `docs/japan-models.md` — a connection guide for the seven domestic LLMs Japan's
+  Digital Agency selected for the 源内 (Gennai) government platform: PLaMo,
+  tsuzumi 2, Llama-3.1-ELYZA-JP-70B, Sarashina2 mini, cotomi v3, Takane 32B and
+  CC Gov-LLM. No code changed, and none was needed — `phi4-mini` was only ever a
+  default string, and the four existing dialects already cover every access mode
+  these models ship in. PLaMo is OpenAI-compatible and works today; tsuzumi is
+  reachable through the existing `azure` dialect.
+
+  **The guide documents how to connect, not that connecting works.** PhiGate's
+  contract depends on the upstream model echoing `<V1>` and `#REF1` verbatim, and
+  a model that paraphrases them breaks restoration silently. No domestic model
+  has been measured against that contract, so every row reads "connection
+  documented" rather than "verified", and three proprietary models are left
+  explicitly unresolved instead of being guessed at.
+
+  Two things worth knowing before wiring any of this up, both recorded in the
+  guide: the Gennai product names mostly do not correspond to public model
+  identifiers, and the 70B ELYZA model the Agency selected has no downloadable
+  weights.
+
+- The Backends section of `README.ja.md`, which did not exist. A Japanese-only
+  reader could not learn how to change the model from that file — the whole
+  `PHIGATE_{LOCAL,CLOUD}_*` table and the Anthropic/Bedrock dialect notes were
+  English-only.
+
+- Commented domestic-model blocks in `.env.example`, and a note in the example
+  price book on why no domestic rates are shipped.
+
 ## [0.4.0] — 2026-09-06
 
 **Read the first entry under "Changed — what may leave the network" before

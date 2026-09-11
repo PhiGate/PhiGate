@@ -50,6 +50,8 @@ guarantees:
 	go test -count=1 ./internal/config/ -run 'TestTenant|TestFailed|TestUnknownKey'
 	@echo "== a failed reload changes nothing =="
 	go test -count=1 ./internal/gateway/ -run 'TestFailedReload|TestReload'
+	@echo "== a reported cost is the vendor's rate, not an older generation's =="
+	go test -count=1 ./internal/tokens/ -run 'TestCurrent|TestShippedExampleBook|TestDatedSnapshots|TestBedrockModels'
 	@echo "== the enterprise detector can never find less than the community one =="
 	cd ee && go test -count=1 ./redact/slm/ -run 'TestCommunityLeakCorpus|TestDetectsEverything|TestOrdinaryProse'
 	@echo "== the audit chain makes tampering evident =="
