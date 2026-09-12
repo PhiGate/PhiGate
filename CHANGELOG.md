@@ -12,6 +12,39 @@ read.
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-09-13
+
+**Two things need re-approval before upgrading**, both detailed below. The
+savings counters changed metric type, so an existing dashboard panel or alert
+querying them as gauges needs revisiting. And `/debug/compress` now requires a
+credential marked `admin`, so if you use it, annotate that credential first.
+
+The release is about what an enterprise deployment asked for and could not get.
+A caller could authenticate only with a key PhiGate minted, stored and somebody
+rotated by hand — and once authenticated reached every endpoint, including the
+one that returns masked values in plaintext. The savings figure the product is
+sold on described one pod since it last started. The template cache, the
+largest saving PhiGate makes, was per-process while the chart shipped two
+replicas. And a request that was slow gave an SRE nothing to say whether the
+gateway or the model owned the latency.
+
+Each of those now has an answer, and the split between the editions did the
+work it exists for: OIDC and roles are in the community edition and added no
+dependency at all, while tracing and the shared cache went to the enterprise
+edition because the OpenTelemetry SDK and a Redis client are exactly the
+dependency tree `make ce-purity` keeps out. That check still reports the
+community edition linking tree-sitter and nothing more.
+
+`make guarantees` grows from fifteen named checks to nineteen. Each new one
+shipped in the commit that created the thing it guards rather than after it,
+and each was verified to match a test before being added — `go test -run`
+reports success when a pattern matches nothing, so a suite assembled from
+regexes can pass while checking none of them.
+
+0.6.0 rather than 0.5.1: two behaviours changed, and `Guard.Redact`,
+`config.Role` and the OIDC configuration are new exported surface. Chart version
+and appVersion track the release.
+
 ### Added — enterprise edition
 
 - **OpenTelemetry tracing.** `PHIGATE_EE_OTLP_ENDPOINT=collector:4318` and the
