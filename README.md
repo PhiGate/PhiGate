@@ -98,8 +98,58 @@ PhiGate is the point of the tool.
 
 ### Answer quality
 
-Not published yet — and deliberately not estimated. It needs API credentials and
-real money, so it can only be run by someone with both. See the bill first:
+Measured 2026-09-12 against question (a) below — the pipeline alone. Both arms
+answer with `claude-sonnet-5`, the judge is `claude-sonnet-5`, five runs per
+case, and the gateway ran with `PHIGATE_CACHE_ENABLED=false` so both arms
+generate afresh rather than one of them replaying a cached answer.
+
+| Case | Raw | PhiGate | Delta |
+|---|---|---|---|
+| nginx-upstream-timeout | 9.00 ±0.00 | 9.00 ±0.00 | +0.00 |
+| oomkilled-pod | 9.20 ±0.40 | 9.80 ±0.40 | +0.60 |
+| multi-component-cascade | 9.00 ±0.00 | 9.00 ±0.00 | +0.00 |
+| high-placeholder-density | 9.00 ±0.00 | 9.00 ±0.00 | +0.00 |
+| code-connection-leak | 9.80 ±0.40 | 9.20 ±0.40 | −0.60 |
+| japanese-incident-ticket | 8.00 ±0.63 | 8.80 ±0.40 | +0.80 |
+| disk-full-remediation | 9.00 ±0.00 | 1.60 ±3.20 | **−7.40** |
+| tls-cert-expiry | 8.60 ±0.49 | 7.60 ±1.02 | −1.00 |
+| **Seven cases, excluding the guarded one** | **8.94** | **8.91** | **−0.03** |
+
+**Read the `disk-full-remediation` row before reading the average.** Its −7.40
+is not compression degrading an answer, it is the egress guard withholding one.
+The prompt asks for commands to clear a full `/var`; on four runs in five the
+model answered with `find` rooted at a system directory with `-delete`, which
+the `find_delete_root` rule blocks. The guard is doing exactly what it is sold
+to do. It does it by replacing the entire response, including the safe majority
+— the `du` hunt for the consumer, the `lsof` check for deleted-but-open files,
+the log-rotation advice — so an operator with a service down receives a wall
+instead. That is a product defect, it is tracked as one, and folding it into a
+compression average would have hidden it.
+
+Excluding that case, the pipeline costs **0.03 points on a 0–10 scale**, against
+a largest remaining per-case spread of ±1.02. There is no measurable quality
+difference between answering the raw prompt and answering the compressed,
+anonymised one.
+
+`tls-cert-expiry` (−1.00) is the one case where compression itself costs
+something, and it is worth understanding rather than averaging away. The prompt
+names `api.internal.corp`; `internal_hostname` masks it to `<V1>`; and that
+hostname was the clue that the chain is served by a private CA. Where internal
+topology *is* the diagnostic signal, the privacy guarantee has a price. This is
+what that price looks like.
+
+Prompt-token saving on the same run: **64.2%**. Almost all of it is routing
+rather than compression — the five locally-routed cases avoid the cloud call
+entirely, while the three that do reach the cloud compress by 0.6–11%. The
+97.4% in the compression table above is the same pipeline on bulk logs, which
+is the shape Drain has most to work with; eight short incident questions are
+the shape it has least. Quote whichever matches the traffic you send, and say
+which one you quoted. Note also that this run pinned the local backend to a
+paid API to hold the model constant, so a locally-routed case avoided the cloud
+call without being free; in a deployment where local inference is your own
+hardware, it is.
+
+Reproduce it, or price it first:
 
 ```bash
 ./bin/phigate-eval eval -cases eval/cases.json -dry-run -repeat 5
@@ -133,10 +183,9 @@ wrong, which is why the two are separated here.
 `anthropic` or `bedrock` — so the comparison is against whatever you actually
 use today.
 
-**When these numbers are published, they will carry three caveats**, and it is
-worth knowing them before you run it yourself:
+**These numbers carry three caveats**, and none of them is incidental:
 
-- Unlike the compression table above, they will **not** come from a third-party
+- Unlike the compression table above, they do **not** come from a third-party
   corpus. `eval/cases.json` holds eight cases written by this project, chosen to
   include the payloads PhiGate finds hardest — high placeholder density,
   AST-pruned code, Japanese text. That is a sanity check, not an independent
@@ -146,7 +195,16 @@ worth knowing them before you run it yourself:
   than the spread is noise, not a finding.
 - The judge shares a model family with the answers, which biases it. The same
   judge scores both arms, so the bias largely cancels in the *delta*, which is
-  the figure that matters.
+  the figure that matters. The absolute scores are not comparable to any other
+  benchmark's; the delta is the only column worth quoting.
+
+**This table is a measurement, not a guarantee**, and the difference is the one
+the guarantee table above is built on. The leak corpus and the policy tests run
+in CI and fail the build when a claim stops holding. Answer quality cannot: it
+costs real money per run and needs credentials no CI job should hold. So the
+figure is dated, the command that produced it is written down, and it will drift
+silently until someone re-runs it. Treat it as you would a benchmark in a paper —
+evidence that a specific build behaved a specific way on a specific day.
 
 Savings are read from the first run of each case, on a cold cache. Later repeats
 are exact cache hits that save the whole baseline, and taking one of those would
