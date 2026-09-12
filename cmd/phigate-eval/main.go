@@ -486,6 +486,7 @@ func runEval(args []string) error {
 	dryRun := fs.Bool("dry-run", false, "print the call count, token estimate and bill, and make no API calls")
 	priceBook := fs.String("price-book", "", "JSON price book for the -dry-run estimate")
 	jsonOut := fs.Bool("json", false, "emit JSON instead of a table")
+	warmOK := fs.Bool("allow-warm-cache", false, "run even if the gateway's template cache is already populated")
 	_ = fs.Parse(args)
 	if *repeat < 1 {
 		*repeat = 1
@@ -533,7 +534,26 @@ func runEval(args []string) error {
 	}
 
 	ctx := context.Background()
+
+	// Refuse to measure through a warm cache.
+	//
+	// The savings figure is read from run 0 so that later repeats, which are
+	// exact cache hits, cannot inflate it. That guard holds within one
+	// invocation and not across two: a gateway left running from an earlier
+	// eval answers run 0 from cache as well, and every case then reports having
+	// saved the whole baseline. The observed failure was 100% against a cold
+	// truth of 64.2%, and nothing in the output said so.
+	//
+	// This is the dangerous direction for a benchmark to fail in. Re-running it
+	// makes the product look better, so the mistake does not get reported — the
+	// operator who makes it has no reason to doubt the number, and neither did
+	// the author of this comment.
+	if err := requireColdCache(ctx, *gateway, *gatewayKey, *warmOK); err != nil {
+		return err
+	}
+
 	results := make([]evalResult, 0, len(doc.Cases))
+	unscored := 0
 
 	for _, c := range doc.Cases {
 		// Every case is run -repeat times. A judge model is not deterministic,
@@ -556,13 +576,34 @@ func runEval(args []string) error {
 				return fmt.Errorf("phigate %s: %w", c.Name, err)
 			}
 
+			// Savings come from the gateway's own metadata and owe nothing to
+			// the judge, so they are recorded before scoring. A run whose judge
+			// is unreadable still contributes a valid savings figure.
+			if run == 0 {
+				route = meta.Route
+				// Both figures are PhiGate's own, so the ratio between them is
+				// consistent by construction.
+				rawTok = meta.BaselineTokens
+				gatedTok = meta.TokensSaved
+			}
+
+			// An unreadable judge costs this run, not the benchmark. Aborting
+			// discarded every score collected so far — twenty minutes of work
+			// returning nothing because the last judge call came back as
+			// Markdown. Both arms are dropped together so the pairing the
+			// delta depends on stays intact, and the count is disclosed at the
+			// end rather than quietly reducing the sample.
 			rawScore, cmt, err := judge(ctx, direct, *judgeModel, c, rawAnswer)
 			if err != nil {
-				return fmt.Errorf("judge baseline %s: %w", c.Name, err)
+				fmt.Fprintf(os.Stderr, "  unscored: %s run %d, baseline arm: %v\n", c.Name, run+1, err)
+				unscored++
+				continue
 			}
 			gatedScore, _, err := judge(ctx, direct, *judgeModel, c, gatedAnswer)
 			if err != nil {
-				return fmt.Errorf("judge phigate %s: %w", c.Name, err)
+				fmt.Fprintf(os.Stderr, "  unscored: %s run %d, phigate arm: %v\n", c.Name, run+1, err)
+				unscored++
+				continue
 			}
 
 			rawScores = append(rawScores, rawScore)
@@ -578,13 +619,14 @@ func runEval(args []string) error {
 			// reading the last run reported 100% where the cold truth is 64%.
 			// A benchmark that gets more flattering the more times you run it
 			// is measuring itself.
-			if run == 0 {
-				route = meta.Route
-				// Both figures are PhiGate's own, so the ratio between them is
-				// consistent by construction.
-				rawTok = meta.BaselineTokens
-				gatedTok = meta.TokensSaved
-			}
+		}
+
+		// A case no run could score is omitted rather than shown as zero:
+		// meanSD of nothing is 0.0, which reads as a model that answered badly
+		// instead of a judge that could not be read.
+		if len(rawScores) == 0 {
+			fmt.Fprintf(os.Stderr, "  omitted: %s scored in none of %d run(s)\n", c.Name, *repeat)
+			continue
 		}
 
 		saving := 0.0
@@ -635,6 +677,12 @@ func runEval(args []string) error {
 		fmt.Printf("\n  ⚠ Largest per-case spread is ±%.2f on a 0-10 scale. A delta smaller than\n", maxSD)
 		fmt.Printf("    that is judge noise, not a quality difference.\n")
 	}
+	if unscored > 0 {
+		fmt.Printf("\n  ⚠ %d judge call(s) returned nothing readable and their run was dropped.\n", unscored)
+		fmt.Printf("    The scores above rest on a smaller sample than -repeat asked for.\n")
+		fmt.Printf("    Disclose this alongside the table; a benchmark that hides its\n")
+		fmt.Printf("    missing data is the kind a buyer is right to discount.\n")
+	}
 	fmt.Printf("\n  Report both numbers together. A saving figure without the quality\n")
 	fmt.Printf("  figure beside it is the number every buyer already distrusts.\n\n")
 	return nil
@@ -647,11 +695,87 @@ func runEval(args []string) error {
 // so a baseline against Claude or Bedrock is exercised by the same translation
 // the product ships — a benchmark whose two arms disagree about the wire format
 // is measuring the harness.
+// requireColdCache fails when the gateway already holds cached templates.
+//
+// A gateway that cannot be asked is reported and allowed: the check exists to
+// catch a stale process, not to make the harness depend on a stats endpoint
+// being reachable.
+func requireColdCache(ctx context.Context, gateway, key string, allow bool) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		strings.TrimSuffix(gateway, "/")+"/phigate/stats", nil)
+	if err != nil {
+		return nil
+	}
+	if key != "" {
+		req.Header.Set("Authorization", "Bearer "+key)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "  note: could not read gateway stats (%v); cache state unverified\n", err)
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		fmt.Fprintf(os.Stderr, "  note: gateway stats returned %s; cache state unverified\n", resp.Status)
+		return nil
+	}
+	var stats struct {
+		Cache struct {
+			Enabled bool `json:"enabled"`
+			Entries int  `json:"entries"`
+		} `json:"cache"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&stats); err != nil {
+		return nil
+	}
+	if !stats.Cache.Enabled || stats.Cache.Entries == 0 {
+		return nil
+	}
+	if allow {
+		fmt.Fprintf(os.Stderr, "  ⚠ gateway cache holds %s; the savings figure is "+
+			"inflated and must not be published\n", entries(stats.Cache.Entries))
+		return nil
+	}
+	return fmt.Errorf("the gateway's template cache already holds %s, so the "+
+		"savings figure would be measured through a warm cache and report close to 100%%.\n"+
+		"Restart PhiGate, or start it with PHIGATE_CACHE_ENABLED=false to measure the "+
+		"pipeline without the cache, then re-run.\n"+
+		"Pass -allow-warm-cache only when the inflated figure is what you meant to measure",
+		entries(stats.Cache.Entries))
+}
+
+// entries renders a cache count for a sentence a human reads.
+func entries(n int) string {
+	if n == 1 {
+		return "1 entry"
+	}
+	return fmt.Sprintf("%d entries", n)
+}
+
 func askDirect(ctx context.Context, c llm.Client, model, prompt string) (string, error) {
-	resp, err := c.Chat(ctx, &types.ChatCompletionRequest{
+	return askDirectJSON(ctx, c, model, prompt, false)
+}
+
+// askDirectJSON asks model for prompt, optionally constraining the reply to a
+// single JSON object.
+//
+// The judge needs that constraint. Asking a local model for "only JSON" in the
+// prompt text is a request, not a guarantee: llama3.1 answers the same prompt
+// with a bare object on one call, an object followed by prose on the next, and
+// a Markdown heading ("**Score:** 8/10") on a third. response_format makes the
+// shape a property of the request instead of a hope, and every OpenAI-compatible
+// server this harness is pointed at — Ollama included — honours it.
+func askDirectJSON(ctx context.Context, c llm.Client, model, prompt string, jsonObject bool) (string, error) {
+	req := &types.ChatCompletionRequest{
 		Model:    model,
 		Messages: []types.Message{{Role: "user", Content: prompt}},
-	})
+	}
+	if jsonObject {
+		req.Extra = map[string]json.RawMessage{
+			"response_format": json.RawMessage(`{"type":"json_object"}`),
+		}
+	}
+	resp, err := c.Chat(ctx, req)
 	if err != nil {
 		return "", err
 	}
@@ -729,22 +853,48 @@ Respond with only JSON: {"score": <0-10 number>, "comment": "<one sentence>"}.
 Grade on technical correctness and actionability. Do not reward verbosity.`,
 		c.Prompt, c.Rubric, answer)
 
-	out, err := askDirect(ctx, client, model, prompt)
+	out, err := askDirectJSON(ctx, client, model, prompt, true)
 	if err != nil {
 		return 0, "", err
 	}
-	var verdict struct {
-		Score   float64 `json:"score"`
-		Comment string  `json:"comment"`
+	v, err := parseVerdict(out)
+	if err != nil {
+		return 0, "", err
 	}
-	clean := strings.TrimSpace(out)
-	clean = strings.TrimPrefix(clean, "```json")
-	clean = strings.TrimPrefix(clean, "```")
-	clean = strings.TrimSuffix(clean, "```")
-	if err := json.Unmarshal([]byte(strings.TrimSpace(clean)), &verdict); err != nil {
-		return 0, "", fmt.Errorf("judge returned unparseable output %q: %w", truncate(out, 120), err)
+	return v.Score, v.Comment, nil
+}
+
+// verdict is one judge score.
+type verdict struct {
+	Score   float64 `json:"score"`
+	Comment string  `json:"comment"`
+}
+
+// parseVerdict reads the judge's reply.
+//
+// The object is located and decoded on its own rather than assumed to be the
+// entire reply, for the reason ee/redact/slm/recognizer.go gives for doing the
+// same: models wrap JSON in prose and in code fences however firmly they are
+// asked not to. A judge that accepts only a perfectly obedient model cannot
+// grade the local models this harness exists to measure — llama3.1 emits a
+// valid object and then keeps explaining itself, which failed a whole run at
+// its last case and discarded seven good scores along with it.
+//
+// A reply carrying no object at all is still an error. A score that cannot be
+// read must not be quietly counted as a zero, which would report a quality
+// regression that never happened.
+func parseVerdict(reply string) (verdict, error) {
+	var v verdict
+	start := strings.IndexByte(reply, '{')
+	if start < 0 {
+		return v, fmt.Errorf("judge returned no JSON object: %q", truncate(reply, 120))
 	}
-	return verdict.Score, verdict.Comment, nil
+	// Decode reads exactly one value and ignores whatever follows, which is
+	// what makes trailing commentary harmless rather than fatal.
+	if err := json.NewDecoder(strings.NewReader(reply[start:])).Decode(&v); err != nil {
+		return v, fmt.Errorf("judge returned unparseable output %q: %w", truncate(reply, 120), err)
+	}
+	return v, nil
 }
 
 // ---------------------------------------------------------------- helpers
