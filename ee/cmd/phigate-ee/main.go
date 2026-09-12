@@ -26,8 +26,11 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
+	"github.com/phigate/phigate/ee/cache/shared"
+	"github.com/phigate/phigate/internal/cache"
 	"log"
 	"os"
 
@@ -137,8 +140,40 @@ func main() {
 			cfg.Local.Model)
 	}
 
-	// Still to land, substituting the one seam CE declares that is not yet
-	// filled:
+	if addr := os.Getenv("PHIGATE_EE_CACHE_REDIS"); addr != "" {
+		backend, err := shared.NewRedis(shared.RedisOptions{
+			Addr:     addr,
+			Username: os.Getenv("PHIGATE_EE_CACHE_REDIS_USERNAME"),
+			Password: os.Getenv("PHIGATE_EE_CACHE_REDIS_PASSWORD"),
+			TLS:      os.Getenv("PHIGATE_EE_CACHE_REDIS_TLS") == "true",
+		})
+		if err != nil {
+			log.Fatalf("phigate-ee: %v", err)
+		}
+		// Local first, shared behind it. The tier is installed through the
+		// cache.Store seam, so nothing on the request path learns there is a
+		// second tier — and nothing fails if it goes away.
+		store := shared.New(cache.New(cfg.CacheTTL, cfg.CacheMax), backend, shared.Options{
+			TTL:    cfg.CacheTTL,
+			Prefix: cacheKeyPrefix(),
+		})
+		defer func() { _ = store.Close() }()
+		g.SetCache(store)
+
+		// Report reachability rather than require it. A cache tier that stops
+		// the gateway from starting when it is unavailable would make the
+		// product less available than it was without one.
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		reach := "unreachable at startup, will retry per request"
+		if err := backend.Ping(ctx); err == nil {
+			reach = "reachable"
+		}
+		cancel()
+		log.Printf("  shared cache   : redis %s (%s, prefix %q, ttl %s)",
+			addr, reach, cacheKeyPrefix(), cfg.CacheTTL)
+	}
+
+	// Still to land, substituting the seam CE declares that is not yet filled:
 	//
 	//	g.SetCache(semantic.New(...))   // embedded HNSW tier, via cache.ProbeStore
 
@@ -224,4 +259,17 @@ func enterpriseDetector(cfg config.Config) (redact.Detector, error) {
 		Engine:     engine,
 		Recognizer: slm.NewModelRecognizer(local, cfg.Local.Model),
 	})
+}
+
+// cacheKeyPrefix namespaces shared cache keys.
+//
+// One Redis often serves several deployments, and two PhiGates sharing a
+// keyspace would serve each other's answers — which is correct only if they
+// also share a rule set and a model, and nothing here can check that. The
+// prefix makes the assumption explicit instead of silent.
+func cacheKeyPrefix() string {
+	if p := os.Getenv("PHIGATE_EE_CACHE_PREFIX"); p != "" {
+		return p
+	}
+	return "phigate:"
 }

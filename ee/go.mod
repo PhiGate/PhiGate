@@ -12,14 +12,21 @@ module github.com/phigate/phigate/ee
 
 go 1.26.0
 
-require github.com/phigate/phigate v0.0.0
+require (
+	github.com/alicebob/miniredis/v2 v2.39.0
+	github.com/phigate/phigate v0.0.0
+	github.com/redis/go-redis/v9 v9.22.0
+	go.etcd.io/bbolt v1.5.0
+)
 
 require (
+	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/mattn/go-pointer v0.0.1 // indirect
 	github.com/tree-sitter/go-tree-sitter v0.25.0 // indirect
 	github.com/tree-sitter/tree-sitter-go v0.25.0 // indirect
 	github.com/tree-sitter/tree-sitter-python v0.25.0 // indirect
-	go.etcd.io/bbolt v1.5.0 // indirect
+	github.com/yuin/gopher-lua v1.1.1 // indirect
+	go.uber.org/atomic v1.11.0 // indirect
 	golang.org/x/sys v0.45.0 // indirect
 )
 

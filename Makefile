@@ -64,6 +64,8 @@ guarantees:
 	cd ee && go test -count=1 ./redact/slm/ -run 'TestCommunityLeakCorpus|TestDetectsEverything|TestOrdinaryProse'
 	@echo "== the audit chain makes tampering evident =="
 	cd ee && go test -count=1 ./audit/worm/ -run 'TestAltering|TestRemoving|TestReplacing|TestChainSurvives|TestPrune'
+	@echo "== a shared cache never fails a request, and publishes only masked text =="
+	cd ee && go test -count=1 ./cache/shared/ -run 'TestAnOutageIsAMiss|TestPurgeLeavesTheShared|TestOnlyTheMaskedAnswer|TestASecondReplica'
 	@echo "== a quota survives a restart =="
 	cd ee && go test -count=1 ./tokens/durable/ -run 'TestConsumptionSurvives|TestTenantsDoNot|TestPeriods'
 

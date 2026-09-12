@@ -12,6 +12,49 @@ read.
 
 ## [Unreleased]
 
+### Added — enterprise edition
+
+- **A shared template cache, so N replicas stop paying N times for the same
+  template.** `PHIGATE_EE_CACHE_REDIS=host:port` puts a Redis tier behind the
+  in-process one: local first, shared on a local miss, and a shared hit is
+  promoted locally so the next lookup costs nothing at all.
+
+  The template cache is the largest single saving PhiGate makes, and it was
+  per-process. The chart ships two replicas, so roughly half the achievable hit
+  rate was being left on the floor, and a rescheduled pod started over.
+
+  **Sharing this crosses no boundary that was not already crossed.** A cache
+  entry is the answer before hydration, every placeholder still in place, and
+  its key is a SHA-256 digest of the compressed text — the one operation that
+  cannot be undone. The community cache is already shared across tenants inside
+  one process for that reason. The session dictionary, which maps `<V1>` back
+  to a real value, is the opposite case and stays memory-only: no operational
+  benefit justifies persisting that, and none is claimed here.
+
+  What does change is that entries live in a system PhiGate does not own, so
+  the Redis is part of the deployment — reachable only from the gateway,
+  authenticated, TLS available with `PHIGATE_EE_CACHE_REDIS_TLS=true`, and
+  namespaced by `PHIGATE_EE_CACHE_PREFIX` because one Redis often serves
+  several deployments and two PhiGates sharing a keyspace would serve each
+  other's answers.
+
+  **An outage is a miss, never a failure.** Every backend error — unreachable,
+  timed out, unparseable value — degrades to the community edition's behaviour
+  and is counted so a tier that is silently doing nothing is visible. A cache
+  that can fail a request is a new single point of failure bolted onto a
+  gateway whose job is to stay in the path of production traffic, and the worst
+  outcome of treating an outage as a miss is the bill that would have been paid
+  anyway.
+
+  `Purge` empties the local tier only. A rule change makes existing entries
+  unreachable rather than wrong — new compression hashes to a new key — so
+  flushing a store other replicas are reading from, to reclaim space that costs
+  nothing, is the wrong trade.
+
+  The Redis client lives in `ee/go.mod`. `make ce-purity` still reports the
+  community edition linking nothing but tree-sitter, which is the point of the
+  split.
+
 ### Changed — who may reach what
 
 **One endpoint tightens; nothing else does.** A credential now carries a role,

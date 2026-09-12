@@ -89,7 +89,8 @@ persists or shares hydrated text serves one session's real values to another.
 | `audit.Sink` — tamper-evident chain | **implemented**, `ee/audit/worm` |
 | `tokens.LedgerStore` — durable per-tenant quota | **implemented**, `ee/tokens/durable` |
 | `redact.Detector` — gazetteer + model-backed JP names | **implemented**, `ee/redact/slm` |
-| `cache.Store` — semantic tier | **not built, deliberately** — see below |
+| `cache.Store` — shared tier across replicas | **implemented**, `ee/cache/shared` |
+| `cache.ProbeStore` — semantic tier | **not built, deliberately** — see below |
 
 `phigate-ee` serves once it has at least one enterprise implementation to offer,
 and refuses without one: it requires `PHIGATE_EE_AUDIT_DIR`, because a binary
@@ -204,6 +205,50 @@ case for the property.
 If the model is slow or unavailable, detection falls back to CE's engine alone
 and the request succeeds. `Stats().Degraded` counts those, because a silent
 degradation is one nobody can alert on.
+
+### The shared cache
+
+The template cache is the largest single saving PhiGate makes, and in the
+community edition it is per-process. The chart ships two replicas, so roughly
+half the achievable hit rate goes unclaimed and a rescheduled pod starts over.
+
+```bash
+PHIGATE_EE_CACHE_REDIS=redis.internal:6379
+PHIGATE_EE_CACHE_REDIS_TLS=true
+PHIGATE_EE_CACHE_PREFIX=phigate:        # one Redis often serves several deployments
+```
+
+Local first, shared on a local miss, and a shared hit is promoted locally so the
+next lookup costs nothing at all.
+
+**Why sharing this is a different question from sharing the session
+dictionary.** The dictionary maps `<V1>` back to the real value and is
+memory-only on purpose: a shared store would persist exactly what the gateway
+exists to keep in. A cache entry is the opposite — the answer *before*
+hydration, every placeholder still in place, keyed by a SHA-256 digest of the
+compressed text, which is the one operation that cannot be undone. The
+community cache is already shared across tenants inside one process for that
+reason. Sharing it across processes widens who can read masked text, and masked
+text is what the whole pipeline exists to produce.
+
+What does change is that entries live somewhere PhiGate does not own. Treat the
+Redis as part of the deployment: reachable only from the gateway,
+authenticated, and encrypted in transit.
+
+**An outage is a miss, never a failure.** Unreachable, timed out, or a value
+this version cannot parse all degrade to community behaviour, and all are
+counted so a tier that is silently doing nothing is visible rather than merely
+harmless. A cache that can fail a request is a new single point of failure
+bolted onto a gateway whose job is to stay in the path of production traffic.
+
+`Purge` empties the local tier only. A rule change makes existing entries
+unreachable rather than wrong — text compressed under new rules hashes to a new
+key — so flushing a store other replicas are reading from, to reclaim space that
+costs nothing, is the wrong trade.
+
+The Redis client is a dependency of `ee/go.mod` and of nothing else. `make
+ce-purity` still reports the community edition linking nothing but tree-sitter,
+which is what the module split is for.
 
 ### The semantic cache, and why it is not here
 
