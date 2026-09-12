@@ -52,6 +52,19 @@ without streaming to get the full answer with the span cut out. The two
 transports still agree on whether a rule fired and which one, which is what
 `parity_test.go` asserts and what the guarantee was always about.
 
+The benchmark was re-run against the fixed build rather than left with a
+footnote. `disk-full-remediation` moves from 1.60 to 7.20 against a raw 8.60,
+and the whole-suite mean from -0.95 to +0.12 over eight cases with nothing
+excluded — a figure still well inside the ±2.14 largest spread, so the claim it
+supports is "no measurable difference", not "PhiGate answers better".
+
+Re-running also retracted a claim. The earlier run scored `tls-cert-expiry` at
+-1.00 and the README explained it as the price of masking an internal hostname
+that was itself the diagnostic clue. The same case scores +1.20 here. The
+masking is real — `api.internal.corp` does become `<V1>` — but the quality cost
+attributed to it was one sample read as a finding, and the README now says so
+where the claim used to be.
+
 ## [0.4.1] — 2026-09-12
 
 **If you report spend from the shipped example price book, the Claude Opus 4.x

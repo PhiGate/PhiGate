@@ -105,44 +105,43 @@ generate afresh rather than one of them replaying a cached answer.
 
 | Case | Raw | PhiGate | Delta |
 |---|---|---|---|
-| nginx-upstream-timeout | 9.00 ±0.00 | 9.00 ±0.00 | +0.00 |
-| oomkilled-pod | 9.20 ±0.40 | 9.80 ±0.40 | +0.60 |
+| nginx-upstream-timeout | 8.60 ±0.80 | 9.00 ±0.00 | +0.40 |
+| oomkilled-pod | 9.40 ±0.49 | 9.40 ±0.49 | +0.00 |
 | multi-component-cascade | 9.00 ±0.00 | 9.00 ±0.00 | +0.00 |
 | high-placeholder-density | 9.00 ±0.00 | 9.00 ±0.00 | +0.00 |
-| code-connection-leak | 9.80 ±0.40 | 9.20 ±0.40 | −0.60 |
-| japanese-incident-ticket | 8.00 ±0.63 | 8.80 ±0.40 | +0.80 |
-| disk-full-remediation | 9.00 ±0.00 | 1.60 ±3.20 | **−7.40** |
-| tls-cert-expiry | 8.60 ±0.49 | 7.60 ±1.02 | −1.00 |
-| **Seven cases, excluding the guarded one** | **8.94** | **8.91** | **−0.03** |
+| code-connection-leak | 9.40 ±0.49 | 10.00 ±0.00 | +0.60 |
+| japanese-incident-ticket | 8.80 ±0.40 | 9.00 ±0.00 | +0.20 |
+| disk-full-remediation | 8.60 ±0.80 | 7.20 ±2.14 | −1.40 |
+| tls-cert-expiry | 7.20 ±1.72 | 8.40 ±0.49 | +1.20 |
+| **All eight** | **8.75** | **8.88** | **+0.12** |
 
-**Read the `disk-full-remediation` row before reading the average.** Its −7.40
-is not compression degrading an answer, it is the egress guard withholding one.
-*The defect it exposed has since been fixed* — a block now cuts out the
-offending span and delivers the rest — but the table is left as measured. It
-records what that build did on that day, and the figure a reader should distrust
-is the one a vendor quietly improves after the fact. Nobody has re-run it.
-The prompt asks for commands to clear a full `/var`; on four runs in five the
-model answered with `find` rooted at a system directory with `-delete`, which
-the `find_delete_root` rule blocks. The guard is doing exactly what it is sold
-to do. It does it by replacing the entire response, including the safe majority
-— the `du` hunt for the consumer, the `lsof` check for deleted-but-open files,
-the log-rotation advice — so an operator with a service down receives a wall
-instead. That is a product defect, it is tracked as one, and folding it into a
-compression average would have hidden it.
+**+0.12 does not mean PhiGate improves answers.** The largest per-case spread is
+±2.14 on the same scale, so a mean delta of a tenth of a point is judge noise
+and the honest reading is that there is no measurable quality difference between
+answering the raw prompt and answering the compressed, anonymised one. That is
+the claim this table supports, and it is the one worth making.
 
-Excluding that case, the pipeline costs **0.03 points on a 0–10 scale**, against
-a largest remaining per-case spread of ±1.02. There is no measurable quality
-difference between answering the raw prompt and answering the compressed,
-anonymised one.
+**`disk-full-remediation` is the row with a history.** An earlier run of this
+same benchmark scored it **1.60 against a raw 9.00**, because the egress guard
+withheld the *whole* response over one `find ... -delete` in a four-step
+remediation — the `du` hunt, the `lsof` check for deleted-but-open files and the
+log-rotation advice went with it. That was a real defect, it was found by this
+benchmark rather than by argument, and it is fixed: a block now cuts out the
+span the rule matched and delivers the rest. The row above is the same case
+re-measured against the fixed build. The −7.40 that exposed the defect is kept
+in the [changelog](CHANGELOG.md) rather than erased, because a number a vendor
+improves quietly is one a reader should distrust.
 
-`tls-cert-expiry` (−1.00) is the one case where compression itself costs
-something, and it is worth understanding rather than averaging away. The prompt
-names `api.internal.corp`; `internal_hostname` masks it to `<V1>`; and that
-hostname was the clue that the chain is served by a private CA. Where internal
-topology *is* the diagnostic signal, the privacy guarantee has a price. This is
-what that price looks like.
+**A correction, on the record.** An earlier run scored `tls-cert-expiry` at
+−1.00 and this README explained it: `internal_hostname` masks `api.internal.corp`
+to `<V1>`, and that hostname is the clue that the chain comes from a private CA.
+The masking is real and worth knowing about. The quality cost attributed to it
+was not — the same case scores **+1.20** here, and both figures sit inside a
+±1.72 spread. It was a story built on one sample, which is exactly what the
+second caveat below warns against. The mechanism stands; the price tag does not.
 
-Prompt-token saving on the same run: **64.2%**. Almost all of it is routing
+Prompt-token saving on the same run: **64.2%**, unchanged from the earlier run —
+compression and routing are deterministic, so only the judged columns move. Almost all of it is routing
 rather than compression — the five locally-routed cases avoid the cloud call
 entirely, while the three that do reach the cloud compress by 0.6–11%. The
 97.4% in the compression table above is the same pipeline on bulk logs, which
