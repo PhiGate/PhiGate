@@ -14,6 +14,31 @@ read.
 
 ### Added — enterprise edition
 
+- **OpenTelemetry tracing.** `PHIGATE_EE_OTLP_ENDPOINT=collector:4318` and the
+  gateway stops being a black box in the trace the enterprise already has. It
+  joins the caller's trace through W3C `traceparent` rather than starting its
+  own, and the upstream model call is a child span — because a slow request is
+  either the pipeline or the model, and one number for the pair answers neither
+  question.
+
+  The span carries the gateway's decisions: route, backend, cache result,
+  egress policy, sensitivity, the blocking rule where there was one, tokens
+  saved, compression ratio. They are read from the `X-PhiGate-*` response
+  headers, which are a published interface, so the instrumentation does not
+  have to be revised every time the request path moves.
+
+  **A span never carries payload** — not the prompt, not the answer, not a
+  placeholder. A tracing backend is a third system with its own retention and
+  breach surface, usually chosen by a different team from the one that reviewed
+  PhiGate, and a gateway that anonymises a log and then writes it to a span has
+  moved the leak rather than closed it. The exported header list is explicit
+  rather than a wildcard, so a header added later cannot start exporting
+  something it should not, and `make guarantees` asserts it.
+
+  Sampling defaults to everything: this traffic is low-volume by web-tier
+  standards and the traces worth keeping are the slow and the blocked ones,
+  which is what a ratio sampler discards at random.
+
 - **A shared template cache, so N replicas stop paying N times for the same
   template.** `PHIGATE_EE_CACHE_REDIS=host:port` puts a Redis tier behind the
   in-process one: local first, shared on a local miss, and a shared hit is

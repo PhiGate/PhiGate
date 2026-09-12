@@ -90,6 +90,7 @@ persists or shares hydrated text serves one session's real values to another.
 | `tokens.LedgerStore` — durable per-tenant quota | **implemented**, `ee/tokens/durable` |
 | `redact.Detector` — gazetteer + model-backed JP names | **implemented**, `ee/redact/slm` |
 | `cache.Store` — shared tier across replicas | **implemented**, `ee/cache/shared` |
+| OpenTelemetry tracing | **implemented**, `ee/observability/tracing` |
 | `cache.ProbeStore` — semantic tier | **not built, deliberately** — see below |
 
 `phigate-ee` serves once it has at least one enterprise implementation to offer,
@@ -249,6 +250,50 @@ costs nothing, is the wrong trade.
 The Redis client is a dependency of `ee/go.mod` and of nothing else. `make
 ce-purity` still reports the community edition linking nothing but tree-sitter,
 which is what the module split is for.
+
+### Tracing
+
+```bash
+PHIGATE_EE_OTLP_ENDPOINT=otel-collector.internal:4318
+PHIGATE_EE_OTLP_INSECURE=false
+PHIGATE_EE_OTLP_SERVICE=phigate
+PHIGATE_EE_OTLP_SAMPLE_RATIO=            # empty samples everything
+```
+
+The ask is not a new observability tool. It is for PhiGate to stop being a black
+box in the trace the enterprise already has: a request arrives having crossed
+the caller's systems, and when it is slow the question is which hop owns the
+latency.
+
+Two spans answer it. The gateway's own, which joins the caller's trace through
+W3C `traceparent` rather than starting a new one, and a child span for the
+upstream model call — because a slow request is either the pipeline or the
+model, and one number for the pair answers neither question.
+
+The gateway's span carries its decisions: route, backend, cache result, egress
+policy, sensitivity, the blocking rule where there was one, tokens saved and
+compression ratio. Those are read from the `X-PhiGate-*` response headers, which
+are a published interface, rather than from inside the request path — so the
+instrumentation does not have to be revised every time CE moves something.
+
+**A span never carries payload.** Not the prompt, not the answer, not a
+placeholder. A tracing backend is a third system with its own retention, access
+control and breach surface, usually chosen by a different team from the one that
+reviewed PhiGate. A gateway that anonymises a log on the way out and then writes
+it to a span has moved the leak rather than closed it. The header list is
+explicit rather than "every `X-PhiGate-*`", so a header added later cannot start
+exporting something it should not, and `TestSpansCarryNoPayload` asserts it
+against a handler that answers with both a credential and an internal hostname.
+
+Sampling defaults to everything. A gateway in front of AIOps traffic sees low
+volume by web-tier standards, and the traces worth keeping are the slow and the
+blocked ones — exactly what a ratio sampler discards at random.
+
+This is in the enterprise edition because the OpenTelemetry SDK, its OTLP
+exporter and gRPC are the dependency tree `make ce-purity` exists to keep out of
+CE. The community edition is unchanged and does not know this package exists; it
+attaches through two seams CE already exposes, an exported `Routes()` handler
+and `llm.WithHTTPClient`.
 
 ### The semantic cache, and why it is not here
 

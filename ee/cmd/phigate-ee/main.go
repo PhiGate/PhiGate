@@ -30,9 +30,11 @@ import (
 	"flag"
 	"fmt"
 	"github.com/phigate/phigate/ee/cache/shared"
+	"github.com/phigate/phigate/ee/observability/tracing"
 	"github.com/phigate/phigate/internal/cache"
 	"log"
 	"os"
+	"strconv"
 
 	"github.com/phigate/phigate/ee/audit/worm"
 	"github.com/phigate/phigate/ee/redact/slm"
@@ -87,9 +89,37 @@ func main() {
 		prices.SetLocalCost(cfg.LocalCostPerM)
 	}
 
+	// Tracing is installed before the gateway so the upstream clients can be
+	// built with an instrumented transport. A trace that stops at PhiGate's
+	// own span cannot answer the only question anyone asks of it: whether a
+	// slow request was the pipeline or the model.
+	traceCfg := tracing.Config{
+		Endpoint:    os.Getenv("PHIGATE_EE_OTLP_ENDPOINT"),
+		Insecure:    os.Getenv("PHIGATE_EE_OTLP_INSECURE") == "true",
+		ServiceName: envOr("PHIGATE_EE_OTLP_SERVICE", "phigate"),
+		Version:     envOr("PHIGATE_EE_VERSION", "dev"),
+		SampleRatio: sampleRatio(),
+	}
+	shutdownTracing, err := tracing.Init(context.Background(), traceCfg)
+	if err != nil {
+		log.Fatalf("phigate-ee: %v", err)
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		// Flushing on the way out matters: a gateway that exits without it
+		// loses the trace of whatever it was doing when it was asked to stop,
+		// which is the trace somebody wanted.
+		_ = shutdownTracing(ctx)
+	}()
+
+	var clientOpts []llm.Option
+	if traceCfg.Enabled() {
+		clientOpts = append(clientOpts, llm.WithHTTPClient(tracing.InstrumentClient(nil)))
+	}
 	g, err := gateway.NewWith(cfg, detector, prices,
-		llm.NewClient(gateway.BackendConfig("local", cfg.Local, cfg)),
-		llm.NewClient(gateway.BackendConfig("cloud", cfg.Cloud, cfg)),
+		llm.NewClient(gateway.BackendConfig("local", cfg.Local, cfg), clientOpts...),
+		llm.NewClient(gateway.BackendConfig("cloud", cfg.Cloud, cfg), clientOpts...),
 		router.NewHeuristicRouter())
 	if err != nil {
 		log.Fatalf("phigate-ee: %v", err)
@@ -178,6 +208,14 @@ func main() {
 	//	g.SetCache(semantic.New(...))   // embedded HNSW tier, via cache.ProbeStore
 
 	srv := gateway.NewServer(cfg, g)
+	if traceCfg.Enabled() {
+		// Wrap the handler NewServer built rather than rebuild the server, so
+		// the timeouts and the streaming-safe WriteTimeout stay exactly as CE
+		// configured them.
+		srv.Handler = tracing.Middleware(traceCfg.ServiceName, srv.Handler)
+		log.Printf("  tracing        : otlp %s (service %q, sampling %s)",
+			traceCfg.Endpoint, traceCfg.ServiceName, samplingLabel())
+	}
 	log.Printf("phigate-ee listening on %s", srv.Addr)
 	log.Printf("  audit chain    : %s (retention %s)", dir, auditRetention())
 	if err := srv.ListenAndServe(); err != nil {
@@ -272,4 +310,38 @@ func cacheKeyPrefix() string {
 		return p
 	}
 	return "phigate:"
+}
+
+// envOr reads an environment variable with a fallback.
+func envOr(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
+// sampleRatio reads the head sampling fraction.
+//
+// Zero — sample everything — is the right default here. A gateway in front of
+// AIOps traffic sees low request volume by the standards of a web tier, and the
+// traces worth having are the slow and the blocked ones, which is exactly what
+// a ratio sampler throws away at random.
+func sampleRatio() float64 {
+	v := os.Getenv("PHIGATE_EE_OTLP_SAMPLE_RATIO")
+	if v == "" {
+		return 0
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil || f < 0 || f > 1 {
+		log.Printf("  tracing        : ignoring PHIGATE_EE_OTLP_SAMPLE_RATIO=%q, sampling everything", v)
+		return 0
+	}
+	return f
+}
+
+func samplingLabel() string {
+	if r := sampleRatio(); r > 0 {
+		return strconv.FormatFloat(r, 'g', -1, 64)
+	}
+	return "all"
 }

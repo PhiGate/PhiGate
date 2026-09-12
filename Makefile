@@ -66,6 +66,8 @@ guarantees:
 	cd ee && go test -count=1 ./audit/worm/ -run 'TestAltering|TestRemoving|TestReplacing|TestChainSurvives|TestPrune'
 	@echo "== a shared cache never fails a request, and publishes only masked text =="
 	cd ee && go test -count=1 ./cache/shared/ -run 'TestAnOutageIsAMiss|TestPurgeLeavesTheShared|TestOnlyTheMaskedAnswer|TestASecondReplica'
+	@echo "== a span never carries the payload the pipeline just masked =="
+	cd ee && go test -count=1 ./observability/tracing/ -run 'TestSpansCarryNoPayload|TestSpansCarryTheGateways|TestTheGatewayJoinsTheCallersTrace'
 	@echo "== a quota survives a restart =="
 	cd ee && go test -count=1 ./tokens/durable/ -run 'TestConsumptionSurvives|TestTenantsDoNot|TestPeriods'
 
