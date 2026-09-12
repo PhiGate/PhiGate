@@ -12,6 +12,30 @@ read.
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-09-12
+
+**Read "Changed — what is blocked" before upgrading.** The egress guard's
+behaviour has changed, and under this changelog's own rules that is a change an
+operator re-approves rather than reads.
+
+The release exists because PhiGate can now say what its compression costs in
+answer quality, and could not before. Running that benchmark for the first time
+did two things: it produced a number, and it found a defect in the product
+serious enough that the number was largely measuring the defect rather than the
+pipeline. Both are here — the measurement in the README, the defect fixed, and
+the case re-measured against the fix instead of left with a footnote saying it
+had been.
+
+Getting there needed three repairs to the harness before it would finish a run
+against a local model, which is the configuration it exists to serve. One of the
+three failed in the direction that flatters the product, and that is the kind
+nobody reports.
+
+0.5.0 rather than 0.4.2: a blocked response now carries the answer around the
+withheld span, so what a caller receives has changed, and `Guard.Redact` is new
+exported surface. `make guarantees` already covers what this release added — the
+redaction property went in with the change rather than after it.
+
 ### Changed — what is blocked
 
 **Re-approve this one before upgrading.** The egress guard no longer replaces a
