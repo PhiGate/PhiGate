@@ -31,15 +31,16 @@ guard was right about the last of those and threw the other three away with it,
 on four runs in five. Disk exhaustion is the most common emergency an AIOps
 assistant is asked about, and an assistant that answers it with a wall is one
 whose guard gets switched off — the same failure that scoped these rules to code
-rather than prose in the first place.
+rather than prose in the first place. Re-measured against the fix, the same case
+scores 7.20.
 
-What keeps this safe is the unit. The redaction is the whole segment the rules
+What keeps this safe is the unit. A redaction is the whole segment the rules
 matched on, rounded out to line boundaries, and never anything smaller: cutting
 a matched command in half is the one outcome worse than either blocking or
 allowing it. `Guard.Redact` and `Guard.Inspect` share an evaluation path so they
-cannot disagree about what fired, and re-inspecting a redaction is never blocked
-— asserted as a property over the same fuzz corpus as the stream scanner, and
-added to `make guarantees` rather than left as a claim in a comment.
+cannot disagree about what fired, and re-inspecting a redaction is never
+blocked — a property asserted over the same fuzz corpus as the stream scanner
+and checked by `make guarantees`.
 
 Two things did not change. Tool calls are still dropped whole when a rule fires
 on their arguments: an argument list is not prose, there is nothing in it worth
@@ -48,22 +49,61 @@ still stops at the block rather than resuming past it — everything vetted befo
 that point has already been sent, the tail is not, and the scanner seals because
 there is no safe way to resume a state machine whose invariant is that nothing
 after a block is emitted. The streamed notice now says so, and says to re-request
-without streaming to get the full answer with the span cut out. The two
-transports still agree on whether a rule fired and which one, which is what
-`parity_test.go` asserts and what the guarantee was always about.
+without streaming to get the full answer with the span cut out. Both transports
+still agree on whether a rule fired and on which one.
 
-The benchmark was re-run against the fixed build rather than left with a
-footnote. `disk-full-remediation` moves from 1.60 to 7.20 against a raw 8.60,
-and the whole-suite mean from -0.95 to +0.12 over eight cases with nothing
-excluded — a figure still well inside the ±2.14 largest spread, so the claim it
-supports is "no measurable difference", not "PhiGate answers better".
+### Added
 
-Re-running also retracted a claim. The earlier run scored `tls-cert-expiry` at
--1.00 and the README explained it as the price of masking an internal hostname
-that was itself the diagnostic clue. The same case scores +1.20 here. The
-masking is real — `api.internal.corp` does become `<V1>` — but the quality cost
-attributed to it was one sample read as a finding, and the README now says so
-where the claim used to be.
+- **Answer quality is published.** Eight cases, five runs each, both arms on
+  `claude-sonnet-5` so the only variable is the pipeline, judged by the same
+  model, cache disabled. The mean is 8.75 raw against 8.88 through PhiGate. That
+  +0.12 sits well inside the ±2.14 largest per-case spread, so what it supports
+  is "no measurable quality difference", not "PhiGate answers better".
+
+  The README carries the table, the method and four caveats — including that
+  this is a measurement and not a guarantee. The leak corpus and the policy
+  tests fail the build; answer quality cannot, because it costs money per run
+  and needs credentials no CI job should hold. It is dated, the command is
+  written down, and it will drift until someone re-runs it. `README.ja.md`
+  carries the same numbers and the same warning.
+
+### Fixed
+
+- **Three defects in `phigate-eval` that stopped it measuring anything.** All
+  three surfaced by pointing the harness at a local model, which is the
+  configuration it exists to serve.
+
+  The judge required the entire reply to be one JSON object, stripping only code
+  fences. llama3.1 returns a valid object and then keeps explaining itself, and
+  returns Markdown headings on another call; either ended the run. The object is
+  now located and decoded on its own, as `ee/redact/slm` has always done, and
+  the judge asks for the constraint through `response_format` instead of hoping
+  for it.
+
+  An unreadable judge reply failed the whole benchmark. Two twenty-minute runs
+  ended at their final case and discarded every score collected before it. A
+  judge that cannot be read now costs its own run — both arms together, so the
+  pairing the delta depends on survives — and the count is printed beneath the
+  table.
+
+  The savings figure could be measured through a warm cache. Run 0 is read so
+  that later repeats cannot inflate it, but a gateway left running from an
+  earlier eval answers run 0 from cache as well, and every case then reports
+  saving the whole baseline: observed at 100% against a cold truth of 64.2%. The
+  harness now reads the gateway's cache state before starting and refuses, with
+  `-allow-warm-cache` to override deliberately. This is the direction a
+  benchmark must never fail in, because re-running it makes the product look
+  better and the mistake goes unreported.
+
+  `cmd/phigate-eval` had no tests. It has nine.
+
+- **A published quality claim is retracted.** An earlier run scored
+  `tls-cert-expiry` at −1.00 and the README explained it as the price of masking
+  an internal hostname that was itself the diagnostic clue. The same case scores
+  +1.20 on re-measurement, and both figures sit inside a ±1.72 spread. The
+  masking is real — `api.internal.corp` does become `<V1>` — but the quality
+  cost attributed to it was a single sample read as a finding. The correction is
+  left where the claim was.
 
 ## [0.4.1] — 2026-09-12
 
