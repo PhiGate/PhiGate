@@ -714,7 +714,7 @@ func requireColdCache(ctx context.Context, gateway, key string, allow bool) erro
 		fmt.Fprintf(os.Stderr, "  note: could not read gateway stats (%v); cache state unverified\n", err)
 		return nil
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		fmt.Fprintf(os.Stderr, "  note: gateway stats returned %s; cache state unverified\n", resp.Status)
 		return nil
