@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/phigate/phigate/internal/config"
+	"github.com/phigate/phigate/internal/oidc"
 	"github.com/phigate/phigate/internal/types"
 )
 
@@ -75,24 +76,39 @@ func newAuthenticator(now func() *runtimeState) *authenticator {
 // Wrap enforces authentication on a handler.
 func (a *authenticator) Wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		cfg := a.now().cfg
-		if len(cfg.APIKeys) == 0 && cfg.AllowAnonymous {
+		st := a.now()
+		cfg := st.cfg
+		if len(cfg.APIKeys) == 0 && !cfg.OIDC.Enabled() && cfg.AllowAnonymous {
 			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxTenant, "anonymous")))
 			return
 		}
-		tenant, ok := a.authenticate(r, cfg.APIKeys)
+		tenant, why, ok := a.authenticate(r, cfg.APIKeys, st.oidc)
 		if !ok {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="phigate"`)
-			writeError(w, http.StatusUnauthorized,
-				"missing or invalid credentials", "invalid_request_error", "invalid_api_key")
+			// A token is reported on with its reason; a static key is not.
+			// Telling a caller their token's audience is wrong saves an
+			// integration a day and tells an attacker nothing they do not
+			// already hold. Telling them a key was *nearly* right would be an
+			// oracle, so key failures stay generic.
+			msg := "missing or invalid credentials"
+			if why != "" {
+				msg += ": " + why
+			}
+			writeError(w, http.StatusUnauthorized, msg, "invalid_request_error", "invalid_api_key")
 			return
 		}
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxTenant, tenant)))
 	})
 }
 
-// authenticate accepts the credential in the places OpenAI clients put it.
-func (a *authenticator) authenticate(r *http.Request, keys map[string]string) (string, bool) {
+// authenticate accepts the credential in the places OpenAI clients put it, and
+// returns the tenant it belongs to plus, for a token, why it was refused.
+//
+// Static keys are tried first and unchanged, so a deployment with no identity
+// provider configured behaves exactly as it did. A credential only reaches
+// token verification when it matched no key and has the shape of one, which
+// keeps a static key out of a code path that does network I/O.
+func (a *authenticator) authenticate(r *http.Request, keys map[string]string, v *oidc.Verifier) (tenant, why string, ok bool) {
 	candidates := []string{
 		strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "),
 		r.Header.Get("api-key"), // Azure-style clients
@@ -107,11 +123,27 @@ func (a *authenticator) authenticate(r *http.Request, keys map[string]string) (s
 		// side-channel cannot be used to recover one.
 		for key, tenant := range keys {
 			if subtle.ConstantTimeCompare([]byte(c), []byte(key)) == 1 {
-				return tenant, true
+				return tenant, "", true
 			}
 		}
 	}
-	return "", false
+	if v == nil {
+		return "", "", false
+	}
+	for _, c := range candidates {
+		c = strings.TrimSpace(c)
+		if !oidc.LooksLikeJWT(c) {
+			continue
+		}
+		claims, err := v.Verify(r.Context(), c)
+		if err != nil {
+			// Report the first token that was a token, rather than the last
+			// header that was empty.
+			return "", strings.TrimPrefix(err.Error(), "oidc: "), false
+		}
+		return claims.Tenant, "", true
+	}
+	return "", "", false
 }
 
 // rateLimiter is a per-tenant token bucket.

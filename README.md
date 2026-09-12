@@ -587,6 +587,66 @@ the only figure in PhiGate that is wrong in the flattering direction if you
 read it carelessly, and it is wrong against *itself*, not against reality.
 
 <details>
+<summary><b>Identity provider (OIDC)</b> — authenticate with your own IdP instead of PhiGate's keys</summary>
+
+A static API key is a credential PhiGate mints, stores, and somebody rotates by
+hand. An enterprise already runs an identity provider that does all three, and
+its security review will ask why this does not use it.
+
+Point PhiGate at that provider and clients present tokens it issued:
+
+| Variable | Purpose |
+|---|---|
+| `PHIGATE_OIDC_ISSUER` | Exact `iss` a token must carry. **Unset disables all of this.** |
+| `PHIGATE_OIDC_AUDIENCE` | Exact value that must appear in `aud` |
+| `PHIGATE_OIDC_JWKS_URL` | Where signing keys are published; derived from the issuer if unset |
+| `PHIGATE_OIDC_TENANT_CLAIM` | Claim carrying the caller's group or role, e.g. `groups` |
+| `PHIGATE_OIDC_TENANT_MAP` | `group:tenant,group:tenant` — the same shape as `PHIGATE_API_KEYS` |
+
+```bash
+PHIGATE_OIDC_ISSUER=https://login.microsoftonline.com/<tenant-id>/v2.0
+PHIGATE_OIDC_AUDIENCE=api://phigate
+PHIGATE_OIDC_TENANT_CLAIM=groups
+PHIGATE_OIDC_TENANT_MAP="sre-group-oid:team-sre,fin-group-oid:team-finance"
+```
+
+**Static keys keep working.** Both credential types are accepted at once, so a
+migration happens one client at a time rather than in a single change window.
+A credential is compared against the configured keys first and only reaches
+token verification if it matched none and has the shape of a JWT.
+
+**What is checked, and why each one:**
+
+- The **signature**, against a key from the provider's JWKS endpoint. An
+  unrecognised key id refetches the document at most once a minute, so a
+  rotated key is picked up and a stream of bad tokens is not a way to make
+  PhiGate hammer your IdP.
+- The **algorithm**, against an allow list of asymmetric ones. `none` is
+  refused, and so is every HMAC algorithm — a verifier holding RSA public keys
+  that accepts HS256 can be handed a token signed with the public key as the
+  shared secret, and the public key is public.
+- **Issuer** and **audience**, exactly. A token your provider minted for a
+  different application is not a credential for this one.
+- **Expiry** and **not-before**, with 60 seconds of clock skew. A token with no
+  `exp` at all is refused.
+- The **tenant claim**, against your map. A group that maps to nothing is
+  refused rather than admitted as a default tenant: an unmapped group is a
+  decision you have not made.
+
+A refused token is told why (`audience`, `expired`, and so on) because an
+integration that cannot see the reason costs a day, and the holder of the token
+learns nothing they did not already have. A refused static key stays generic,
+since a specific answer there is an oracle for guessing one.
+
+Verification is implemented against `crypto/rsa` and `crypto/ecdsa` directly
+rather than with a JOSE library, for the reason `internal/metrics` speaks the
+Prometheus format directly: `make ce-purity` asserts the community edition links
+nothing but tree-sitter, and a dependency review that can be finished in an
+afternoon is worth more here than the few hundred lines it saves.
+
+</details>
+
+<details>
 <summary><b>Access control</b></summary>
 
 | Variable | Default | Purpose |

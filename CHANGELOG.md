@@ -12,6 +12,44 @@ read.
 
 ## [Unreleased]
 
+### Added
+
+- **Callers can authenticate with your own identity provider.** Set
+  `PHIGATE_OIDC_ISSUER` and PhiGate accepts OIDC tokens alongside the static
+  keys it issues; leaving it unset changes nothing, which is asserted by a test
+  rather than assumed. Both credential types work at once, so a migration goes
+  one client at a time instead of in a single change window. A credential is
+  compared against the configured keys first and reaches token verification
+  only if it matched none and has the shape of a JWT.
+
+  A static key is a secret PhiGate mints, stores, and somebody rotates by hand.
+  A large enterprise already runs an IdP that does all three, and its security
+  review asks why this does not use it. That question had no answer before now.
+
+  Verified on every token: the signature against the provider's JWKS; the
+  algorithm against an allow list of asymmetric ones — `none` refused, and every
+  HMAC algorithm refused, because a verifier holding RSA public keys that
+  accepts HS256 can be handed a token signed with the public key as the shared
+  secret; issuer and audience exactly; expiry and not-before with 60 seconds of
+  skew, and a token carrying no `exp` at all is refused; and the tenant claim
+  against your map, where a group mapping to nothing is refused rather than
+  admitted as a default, since an unmapped group is a decision the operator has
+  not made. An unrecognised key id refetches the JWKS at most once a minute, so
+  key rotation is picked up while a stream of bad tokens is not a way to make
+  PhiGate hammer your provider.
+
+  A refused *token* is told why; a refused *key* is not. A reason saves an
+  integration a day and tells the holder of the token nothing they did not
+  already have, while a specific answer on a key would be an oracle for guessing
+  one.
+
+  Implemented against `crypto/rsa` and `crypto/ecdsa` directly rather than with
+  a JOSE library, for the reason `internal/metrics` speaks the Prometheus format
+  directly: `make ce-purity` asserts the community edition links nothing but
+  tree-sitter, and it still does. 23 tests in `internal/oidc` and 9 more at the
+  gateway boundary, most of them the attacks rather than the happy path, and
+  `make guarantees` runs them.
+
 ### Changed — what the cost figures say
 
 **Check your dashboards and your chart values before upgrading.** Two changes,

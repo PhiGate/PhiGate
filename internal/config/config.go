@@ -125,6 +125,12 @@ type Config struct {
 	APIKeys map[string]string // key -> tenant label
 	// AllowAnonymous permits running with no API keys configured.
 	AllowAnonymous bool
+
+	// OIDC authenticates callers against the enterprise's own identity
+	// provider instead of a key PhiGate issued. It is additive: static keys
+	// keep working, which is what lets a migration happen one client at a
+	// time rather than in a single change window.
+	OIDC OIDCConfig
 	// TrustedProxyHeader names a header to read the client IP from, e.g.
 	// X-Forwarded-For. Empty means use the socket address.
 	TrustedProxyHeader string
@@ -206,6 +212,32 @@ type Config struct {
 	BreakerThreshold  int
 	BreakerCooldown   time.Duration
 }
+
+// OIDCConfig trusts one identity provider.
+//
+// Static API keys are a credential PhiGate mints, stores and an operator has to
+// rotate by hand; a large enterprise already runs an IdP that does all three,
+// and its security review will ask why this does not use it. Nothing here is
+// required — leaving Issuer empty disables token authentication entirely and
+// the gateway behaves exactly as before.
+type OIDCConfig struct {
+	// Issuer is the exact `iss` a token must carry. Empty disables OIDC.
+	Issuer string
+	// Audience is the exact value that must appear in `aud`.
+	Audience string
+	// JWKSURL is where the provider publishes signing keys. Empty derives it
+	// from the issuer.
+	JWKSURL string
+	// TenantClaim names the claim carrying the caller's group or role.
+	TenantClaim string
+	// TenantMap maps a claim value to a PhiGate tenant. A token whose claim
+	// matches nothing here is refused rather than admitted as a default: an
+	// unmapped group is a decision the operator has not made.
+	TenantMap map[string]string
+}
+
+// Enabled reports whether token authentication is configured.
+func (o OIDCConfig) Enabled() bool { return strings.TrimSpace(o.Issuer) != "" }
 
 // DefaultSystemPreamble explains PhiGate's anonymization convention to the
 // upstream model so it preserves placeholders verbatim in its answer.
@@ -504,6 +536,15 @@ func applyEnv(c *Config) error {
 		c.APIKeys = parseAPIKeys(v)
 	}
 	setBool(&c.AllowAnonymous, "PHIGATE_ALLOW_ANONYMOUS")
+	setStr(&c.OIDC.Issuer, "PHIGATE_OIDC_ISSUER")
+	setStr(&c.OIDC.Audience, "PHIGATE_OIDC_AUDIENCE")
+	setStr(&c.OIDC.JWKSURL, "PHIGATE_OIDC_JWKS_URL")
+	setStr(&c.OIDC.TenantClaim, "PHIGATE_OIDC_TENANT_CLAIM")
+	if v, ok := os.LookupEnv("PHIGATE_OIDC_TENANT_MAP"); ok && strings.TrimSpace(v) != "" {
+		// Same "value:tenant,value:tenant" shape as PHIGATE_API_KEYS, so an
+		// operator learns one format rather than two.
+		c.OIDC.TenantMap = parseAPIKeys(v)
+	}
 	setStr(&c.TrustedProxyHeader, "PHIGATE_TRUSTED_PROXY_HEADER")
 
 	// --- Redaction ---

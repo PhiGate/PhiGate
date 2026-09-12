@@ -49,6 +49,9 @@ guarantees:
 	go test -count=1 ./internal/gateway/ -run 'TestTemplateCache|TestPolicyForbids|TestDebugEndpoint|TestAuthentication|TestShapeKeying|TestCacheHitsAcross'
 	@echo "== tool calls are masked, classified and guarded like anything else =="
 	go test -count=1 ./internal/gateway/ -run 'TestToolCall|TestToolDefinition|TestStreamReassembles|TestStreamGuardsToolCall|TestStreamToolCalls|TestStreamingToolCall'
+	@echo "== a token is accepted only from the configured provider, in date and in audience =="
+	go test -count=1 ./internal/oidc/
+	go test -count=1 ./internal/gateway/ -run 'TestBadTokensAreRefused|TestOIDCUnconfigured|TestStaticKeysKeepWorking|TestRefusedTokensSayWhy'
 	@echo "== a tenant may narrow what the operator configured, never widen it =="
 	go test -count=1 ./internal/config/ -run 'TestTenant|TestFailed|TestUnknownKey'
 	@echo "== a failed reload changes nothing =="

@@ -11,6 +11,7 @@ import (
 	"github.com/phigate/phigate/internal/config"
 	"github.com/phigate/phigate/internal/llm"
 	"github.com/phigate/phigate/internal/metrics"
+	"github.com/phigate/phigate/internal/oidc"
 	"github.com/phigate/phigate/internal/policy"
 	"github.com/phigate/phigate/internal/redact"
 	"github.com/phigate/phigate/internal/router"
@@ -39,6 +40,34 @@ type runtimeState struct {
 	tenants map[string]tenantView
 
 	guard *sandbox.RuleGuard
+
+	// oidc is nil when token authentication is not configured, which is the
+	// default and leaves the static-key path exactly as it was.
+	oidc *oidc.Verifier
+}
+
+// newOIDCVerifier builds a verifier from cfg, or returns nil when OIDC is not
+// configured.
+//
+// A misconfiguration fails here rather than on the first request that presents
+// a token, for the reason a Bedrock backend without a region does: an operator
+// who has told their identity team "PhiGate accepts your tokens now" should
+// find out at startup, not from the first client to try.
+func newOIDCVerifier(cfg config.Config) (*oidc.Verifier, error) {
+	if !cfg.OIDC.Enabled() {
+		return nil, nil
+	}
+	v, err := oidc.New(oidc.Config{
+		Issuer:      cfg.OIDC.Issuer,
+		Audience:    cfg.OIDC.Audience,
+		JWKSURL:     cfg.OIDC.JWKSURL,
+		TenantClaim: cfg.OIDC.TenantClaim,
+		TenantMap:   cfg.OIDC.TenantMap,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("oidc: %w", err)
+	}
+	return v, nil
 }
 
 // Gateway holds the long-lived components shared across requests.
@@ -140,11 +169,16 @@ func (g *Gateway) Reload(cfg config.Config) error {
 	}
 
 	old := g.now()
+	verifier, err := newOIDCVerifier(cfg)
+	if err != nil {
+		return err
+	}
 	g.state.Store(&runtimeState{
 		cfg:     cfg,
 		global:  newTenantView(engine, cfg.Policy),
 		tenants: views,
 		guard:   guard,
+		oidc:    verifier,
 	})
 
 	// A rule change alters what "compressed" means, so every key in the cache
@@ -279,11 +313,16 @@ func NewWith(
 		preamble:   cfg.SystemPreamble,
 		started:    time.Now(),
 	}
+	verifier, err := newOIDCVerifier(cfg)
+	if err != nil {
+		return nil, err
+	}
 	g.state.Store(&runtimeState{
 		cfg:     cfg,
 		global:  newTenantView(engine, cfg.Policy),
 		tenants: views,
 		guard:   guard,
+		oidc:    verifier,
 	})
 	g.limiter = newRateLimiter(g.now)
 	g.budget = newBudgetGuard(g)
