@@ -36,25 +36,29 @@ func (g *Gateway) Routes() http.Handler {
 	mux.HandleFunc("/readyz", g.handleReadyz)
 
 	auth := newAuthenticator(g.now)
-	protect := func(h http.HandlerFunc) http.Handler {
-		return auth.Wrap(g.limiter.Wrap(h))
+	// Each endpoint names the least role that can reach it. Before roles
+	// existed, a key issued to an application so it could ask questions also
+	// read the savings ledger, the dashboard and — where it was enabled — the
+	// plaintext of everything the gateway had just masked.
+	protect := func(need config.Role, h http.HandlerFunc) http.Handler {
+		return auth.Wrap(g.limiter.Wrap(requireRole(need, h)))
 	}
 	// The budget applies to what spends tokens, not to the endpoints that
 	// report on it: a tenant that has exhausted its allowance must still be
 	// able to read /v1/phigate/stats and find out why it is being refused.
 	spend := func(h http.HandlerFunc) http.Handler {
-		return auth.Wrap(g.limiter.Wrap(g.budget.Wrap(http.HandlerFunc(h))))
+		return auth.Wrap(g.limiter.Wrap(g.budget.Wrap(requireRole(config.RoleCaller, h))))
 	}
 
 	mux.Handle("/v1/chat/completions", spend(g.handleChatCompletions))
 	mux.Handle("/v1/embeddings", spend(g.handleEmbeddings))
-	mux.Handle("/v1/models", protect(g.handleModels))
-	mux.Handle("/v1/phigate/stats", protect(g.handleStats))
-	mux.Handle("/v1/phigate/rules", protect(g.handleRules))
-	mux.Handle(st.cfg.MetricsPath, protect(g.handleMetrics))
+	mux.Handle("/v1/models", protect(config.RoleCaller, g.handleModels))
+	mux.Handle("/v1/phigate/stats", protect(config.RoleOperator, g.handleStats))
+	mux.Handle("/v1/phigate/rules", protect(config.RoleOperator, g.handleRules))
+	mux.Handle(st.cfg.MetricsPath, protect(config.RoleOperator, g.handleMetrics))
 
 	if st.cfg.DashboardOn {
-		mux.Handle("/dashboard", protect(g.handleDashboard))
+		mux.Handle("/dashboard", protect(config.RoleOperator, g.handleDashboard))
 	}
 
 	// The debug endpoint returns the dictionary — every masked value in
@@ -62,7 +66,10 @@ func (g *Gateway) Routes() http.Handler {
 	// exfiltration endpoint for exactly the data the gateway exists to
 	// protect. It is now opt-in and behind authentication.
 	if st.cfg.DebugEnabled {
-		mux.Handle("/debug/compress", protect(g.handleDebugCompress))
+		// Admin, and written down explicitly. This is the one endpoint whose
+		// whole purpose is to undo the masking, so it is the one place where a
+		// generous default actually costs something.
+		mux.Handle("/debug/compress", protect(config.RoleAdmin, g.handleDebugCompress))
 	}
 
 	return recoverPanic(withRequestID(mux))

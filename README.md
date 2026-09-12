@@ -647,6 +647,41 @@ afternoon is worth more here than the few hundred lines it saves.
 </details>
 
 <details>
+<summary><b>Roles</b> — what a credential may reach</summary>
+
+Write a role as the third field of a credential: `key:tenant:role`. The same
+shape works in `PHIGATE_OIDC_TENANT_MAP`, where the value is `tenant:role`.
+
+| Role | May reach |
+|---|---|
+| `caller` | `/v1/chat/completions`, `/v1/embeddings`, `/v1/models` |
+| `operator` | the above, plus `/v1/phigate/stats`, `/v1/phigate/rules`, `/metrics`, `/dashboard` |
+| `admin` | the above, plus `/debug/compress` |
+
+```bash
+PHIGATE_API_KEYS="app-key:team-app:caller,ops-key:team-sre:operator"
+```
+
+**A credential with no role written on it is an `operator`**, which is what
+every credential did before roles existed, so an upgrade does not cut a
+monitoring key off from `/metrics`. `/debug/compress` is the exception and
+requires `admin` explicitly: that endpoint returns the plaintext of every value
+the gateway just masked, and it is the one place where a generous default costs
+something real. An application key issued so a tool could ask questions used to
+reach it.
+
+A valid credential refused here gets **403 with the role it holds and the role
+required**, not 401. Telling an application that its key is merely not allowed
+on this path is the difference between a five-minute fix and an afternoon spent
+suspecting the credential.
+
+Running with `PHIGATE_ALLOW_ANONYMOUS=true` and no keys grants `admin`. That is
+a decision an operator has to make against a refusal to start, and narrowing it
+would protect nothing — there is no credential to escalate from.
+
+</details>
+
+<details>
 <summary><b>Access control</b></summary>
 
 | Variable | Default | Purpose |

@@ -123,6 +123,9 @@ type Config struct {
 	// set: an open proxy in front of a paid API key is a billing incident
 	// waiting to happen.
 	APIKeys map[string]string // key -> tenant label
+	// APIRoles is what each key may reach, keyed the same way. A key absent
+	// from this map is RoleOperator.
+	APIRoles map[string]Role
 	// AllowAnonymous permits running with no API keys configured.
 	AllowAnonymous bool
 
@@ -211,6 +214,85 @@ type Config struct {
 	Retries           int
 	BreakerThreshold  int
 	BreakerCooldown   time.Duration
+}
+
+// Role is what a credential is permitted to reach.
+//
+// Before this existed every authenticated credential reached every endpoint,
+// so a key issued to an application so it could call /v1/chat/completions also
+// read /v1/phigate/stats, the dashboard, and — where it was switched on —
+// /debug/compress, which returns the plaintext of every value the gateway had
+// just masked. One credential could retrieve exactly what the product exists
+// to keep in. The roles are ordered, and each includes what the one below it
+// may do.
+type Role string
+
+const (
+	// RoleCaller may use the inference endpoints and nothing else. This is
+	// what an application gets.
+	RoleCaller Role = "caller"
+	// RoleOperator may additionally read what the gateway reports about
+	// itself: stats, rules, metrics, dashboard.
+	RoleOperator Role = "operator"
+	// RoleAdmin may additionally reach /debug/compress. Nothing else needs it,
+	// and it is the one endpoint that undoes the masking on purpose.
+	RoleAdmin Role = "admin"
+)
+
+// DefaultRole is what a credential with no role written on it gets.
+//
+// Operator rather than caller, because every credential in a deployment
+// upgrading to this version was written before roles existed, and silently
+// cutting a monitoring key off from /metrics would be a worse first impression
+// than the permissions being wider than ideal. Debug is the exception: it
+// requires admin to be written down explicitly, because that is the endpoint
+// where the default being generous actually costs something.
+const DefaultRole = RoleOperator
+
+// rank orders the roles. A higher rank includes every lower one.
+func (r Role) rank() int {
+	switch r {
+	case RoleCaller:
+		return 1
+	case RoleOperator:
+		return 2
+	case RoleAdmin:
+		return 3
+	default:
+		return 0
+	}
+}
+
+// Allows reports whether r is permitted to do what need requires.
+func (r Role) Allows(need Role) bool { return r.rank() >= need.rank() }
+
+// ParseRole reads a role name.
+func ParseRole(s string) (Role, bool) {
+	switch Role(strings.ToLower(strings.TrimSpace(s))) {
+	case RoleCaller:
+		return RoleCaller, true
+	case RoleOperator:
+		return RoleOperator, true
+	case RoleAdmin:
+		return RoleAdmin, true
+	default:
+		return "", false
+	}
+}
+
+// SplitTenantRole reads a "tenant" or "tenant:role" value, as written in
+// PHIGATE_API_KEYS and PHIGATE_OIDC_TENANT_MAP. An unreadable role falls back
+// to the default rather than failing, so a typo widens nothing.
+func SplitTenantRole(s string) (tenant string, role Role) {
+	tenant, rest, ok := strings.Cut(strings.TrimSpace(s), ":")
+	tenant = strings.TrimSpace(tenant)
+	if !ok {
+		return tenant, DefaultRole
+	}
+	if r, ok := ParseRole(rest); ok {
+		return tenant, r
+	}
+	return tenant, DefaultRole
 }
 
 // OIDCConfig trusts one identity provider.
@@ -533,6 +615,7 @@ func applyEnv(c *Config) error {
 
 	// --- Access control ---
 	if v, ok := os.LookupEnv("PHIGATE_API_KEYS"); ok && strings.TrimSpace(v) != "" {
+		c.APIRoles = parseAPIRoles(v)
 		c.APIKeys = parseAPIKeys(v)
 	}
 	setBool(&c.AllowAnonymous, "PHIGATE_ALLOW_ANONYMOUS")
@@ -672,12 +755,39 @@ func parseAPIKeys(s string) map[string]string {
 		if key == "" {
 			continue
 		}
-		if !ok || strings.TrimSpace(tenant) == "" {
-			tenant = "default"
+		// "tenant:role" is accepted here too; only the tenant belongs in this
+		// map, and parseAPIRoles reads the rest.
+		name, _ := SplitTenantRole(tenant)
+		if !ok || name == "" {
+			name = "default"
 		}
-		out[key] = strings.TrimSpace(tenant)
+		out[key] = name
 	}
 	return out
+}
+
+// parseAPIRoles reads the optional third field of "key:tenant:role".
+func parseAPIRoles(s string) map[string]Role {
+	out := map[string]Role{}
+	for _, part := range splitList(s) {
+		key, rest, ok := strings.Cut(part, ":")
+		key = strings.TrimSpace(key)
+		if key == "" || !ok {
+			continue
+		}
+		if _, role := SplitTenantRole(rest); role != "" {
+			out[key] = role
+		}
+	}
+	return out
+}
+
+// RoleFor returns the role configured for a key.
+func (c Config) RoleFor(key string) Role {
+	if r, ok := c.APIRoles[key]; ok && r != "" {
+		return r
+	}
+	return DefaultRole
 }
 
 // parseGuardOverrides reads "rule=severity,rule=severity".

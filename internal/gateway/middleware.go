@@ -20,6 +20,7 @@ type ctxKey int
 
 const (
 	ctxTenant ctxKey = iota
+	ctxRole
 	ctxRequestID
 )
 
@@ -73,16 +74,50 @@ func newAuthenticator(now func() *runtimeState) *authenticator {
 	return &authenticator{now: now}
 }
 
+// roleOf returns the role the credential on this request carries.
+func roleOf(r *http.Request) config.Role {
+	if v, ok := r.Context().Value(ctxRole).(config.Role); ok {
+		return v
+	}
+	return config.DefaultRole
+}
+
+// requireRole refuses a request whose credential does not reach need.
+//
+// It runs inside the authenticated handler rather than as a separate wrapper
+// so the answer is always 403 on an authenticated caller and 401 on an
+// unauthenticated one — telling an application with a valid key that it is
+// merely not allowed here is the difference between a five-minute fix and an
+// afternoon spent suspecting the key.
+func requireRole(need config.Role, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !roleOf(r).Allows(need) {
+			writeError(w, http.StatusForbidden,
+				"this credential has role "+string(roleOf(r))+
+					" and this endpoint requires "+string(need),
+				"invalid_request_error", "insufficient_permissions")
+			return
+		}
+		next(w, r)
+	}
+}
+
 // Wrap enforces authentication on a handler.
 func (a *authenticator) Wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		st := a.now()
 		cfg := st.cfg
 		if len(cfg.APIKeys) == 0 && !cfg.OIDC.Enabled() && cfg.AllowAnonymous {
-			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxTenant, "anonymous")))
+			// Anonymous is admin. Running with no credentials at all is an
+			// explicit decision the operator had to make against a refusal to
+			// start, and narrowing it here would break a local dev loop
+			// without protecting anything: there is no credential to escalate
+			// from when there is no credential.
+			ctx := context.WithValue(r.Context(), ctxTenant, "anonymous")
+			next.ServeHTTP(w, r.WithContext(context.WithValue(ctx, ctxRole, config.RoleAdmin)))
 			return
 		}
-		tenant, why, ok := a.authenticate(r, cfg.APIKeys, st.oidc)
+		tenant, role, why, ok := a.authenticate(r, cfg, st.oidc)
 		if !ok {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="phigate"`)
 			// A token is reported on with its reason; a static key is not.
@@ -97,7 +132,8 @@ func (a *authenticator) Wrap(next http.Handler) http.Handler {
 			writeError(w, http.StatusUnauthorized, msg, "invalid_request_error", "invalid_api_key")
 			return
 		}
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxTenant, tenant)))
+		ctx := context.WithValue(r.Context(), ctxTenant, tenant)
+		next.ServeHTTP(w, r.WithContext(context.WithValue(ctx, ctxRole, role)))
 	})
 }
 
@@ -108,7 +144,8 @@ func (a *authenticator) Wrap(next http.Handler) http.Handler {
 // provider configured behaves exactly as it did. A credential only reaches
 // token verification when it matched no key and has the shape of one, which
 // keeps a static key out of a code path that does network I/O.
-func (a *authenticator) authenticate(r *http.Request, keys map[string]string, v *oidc.Verifier) (tenant, why string, ok bool) {
+func (a *authenticator) authenticate(r *http.Request, cfg config.Config, v *oidc.Verifier) (tenant string, role config.Role, why string, ok bool) {
+	keys := cfg.APIKeys
 	candidates := []string{
 		strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "),
 		r.Header.Get("api-key"), // Azure-style clients
@@ -123,12 +160,12 @@ func (a *authenticator) authenticate(r *http.Request, keys map[string]string, v 
 		// side-channel cannot be used to recover one.
 		for key, tenant := range keys {
 			if subtle.ConstantTimeCompare([]byte(c), []byte(key)) == 1 {
-				return tenant, "", true
+				return tenant, cfg.RoleFor(key), "", true
 			}
 		}
 	}
 	if v == nil {
-		return "", "", false
+		return "", "", "", false
 	}
 	for _, c := range candidates {
 		c = strings.TrimSpace(c)
@@ -139,11 +176,14 @@ func (a *authenticator) authenticate(r *http.Request, keys map[string]string, v 
 		if err != nil {
 			// Report the first token that was a token, rather than the last
 			// header that was empty.
-			return "", strings.TrimPrefix(err.Error(), "oidc: "), false
+			return "", "", strings.TrimPrefix(err.Error(), "oidc: "), false
 		}
-		return claims.Tenant, "", true
+		// The tenant map's value carries the role, in the same "tenant:role"
+		// shape PHIGATE_API_KEYS uses, so an operator learns one format.
+		name, role := config.SplitTenantRole(claims.Tenant)
+		return name, role, "", true
 	}
-	return "", "", false
+	return "", "", "", false
 }
 
 // rateLimiter is a per-tenant token bucket.

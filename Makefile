@@ -52,6 +52,8 @@ guarantees:
 	@echo "== a token is accepted only from the configured provider, in date and in audience =="
 	go test -count=1 ./internal/oidc/
 	go test -count=1 ./internal/gateway/ -run 'TestBadTokensAreRefused|TestOIDCUnconfigured|TestStaticKeysKeepWorking|TestRefusedTokensSayWhy'
+	@echo "== a credential reaches only the endpoints its role names =="
+	go test -count=1 ./internal/gateway/ -run 'TestAnApplicationKeyCannot|TestOperatorReadsReporting|TestAdminReachesDebug|TestAKeyWithNoRole|TestForbiddenIsNot'
 	@echo "== a tenant may narrow what the operator configured, never widen it =="
 	go test -count=1 ./internal/config/ -run 'TestTenant|TestFailed|TestUnknownKey'
 	@echo "== a failed reload changes nothing =="

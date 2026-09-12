@@ -12,6 +12,35 @@ read.
 
 ## [Unreleased]
 
+### Changed — who may reach what
+
+**One endpoint tightens; nothing else does.** A credential now carries a role,
+written as the third field: `key:tenant:role`, and the same shape in
+`PHIGATE_OIDC_TENANT_MAP`. `caller` reaches the inference endpoints, `operator`
+adds the gateway's own reporting, `admin` adds `/debug/compress`.
+
+A credential with no role is an `operator`, which is exactly what every
+credential could do before, so an upgrade does not cut a monitoring key off from
+`/metrics`. The exception is `/debug/compress`, which now requires `admin` to be
+written down. **If you use the debug endpoint, add `:admin` to that credential
+before upgrading.**
+
+That endpoint is the reason the whole thing exists. It returns the plaintext of
+every value the gateway just masked, and until now any authenticated credential
+reached it — including one issued to an application purely so it could call
+`/v1/chat/completions`. The same key also read the savings ledger, the rules and
+the dashboard. A gateway whose job is keeping data in should not hand all of it
+to the first credential that asks.
+
+A valid credential refused for its role gets 403 naming the role it holds and
+the role required, not 401. An application told "unauthorized" when its key is
+fine spends an afternoon suspecting the credential; one told "you are a caller
+and this needs an operator" spends five minutes.
+
+`PHIGATE_ALLOW_ANONYMOUS=true` with no keys grants admin. Running with no
+credentials at all is a decision an operator makes against a refusal to start,
+and narrowing it protects nothing — there is no credential to escalate from.
+
 ### Added
 
 - **Callers can authenticate with your own identity provider.** Set
