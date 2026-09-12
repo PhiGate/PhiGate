@@ -568,6 +568,24 @@ one and is explicit that connecting is not the same as having validated it.
 
 </details>
 
+**Savings figures are per-replica.** The ledger is in-process and holds no
+shared state — the same design decision that keeps the session dictionary out of
+Redis — so `/v1/phigate/stats` and the dashboard report what *one* pod has saved
+since it last started. A deployment saves more than either shows. The
+deployment-wide figure comes from Prometheus, where the cumulative totals are
+counters precisely so that summing across replicas and through restarts is
+correct:
+
+```promql
+sum(increase(phigate_cost_saved_total[30d]))     # spend avoided, ledger currency
+sum(increase(phigate_tokens_saved_total[30d]))   # upstream tokens avoided
+sum(increase(phigate_cost_spent_total[30d]))     # what the cloud did cost
+```
+
+Quoting the dashboard number to a finance team under-reports the product. It is
+the only figure in PhiGate that is wrong in the flattering direction if you
+read it carelessly, and it is wrong against *itself*, not against reality.
+
 <details>
 <summary><b>Access control</b></summary>
 

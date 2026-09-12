@@ -19,8 +19,18 @@ replicaCount: 2
 #     which is what service.sessionAffinity below is for.
 #   - The template cache. It holds no customer data, but it is per-process, so
 #     N replicas mean roughly 1/N of the hit rate until each has warmed up.
-#   - The savings ledger, which is per-process and resets on restart. The
-#     dashboard's figures are one replica's, not the deployment's.
+#     Set service.sessionAffinity to None only if you know every client sends
+#     self-contained requests; the default assumes they do not, because that
+#     mistake is silent and the other one is merely untidy.
+#   - The savings ledger, which is per-process and resets on restart. So
+#     /v1/phigate/stats and the dashboard report one replica since it last
+#     started, and the deployment's figure comes from Prometheus instead:
+#
+#       sum(increase(phigate_cost_saved_total[30d]))
+#       sum(increase(phigate_tokens_saved_total[30d]))
+#
+#     Those are counters precisely so that summing across replicas and through
+#     restarts is correct.
 #
 # Clients that do not send X-PhiGate-Session are unaffected by the first point;
 # every request is self-contained and any replica can serve it.
@@ -37,11 +47,18 @@ fullnameOverride: ""
 service:
   type: ClusterIP
   port: 8080
-  # Set to ClientIP to pin a client to one replica, which is what multi-turn
-  # sessions need when replicaCount is above 1. It is off by default because it
-  # is the wrong trade for a purely single-shot workload: affinity unbalances
-  # the pods, and a client behind one NAT address becomes one client.
-  sessionAffinity: None
+  # ClientIP pins a client to one replica, which is what multi-turn sessions
+  # need whenever replicaCount is above 1: the session dictionary that maps
+  # <V1> back to a real value is memory-only and per-process, so a follow-up
+  # turn landing on another replica cannot restore what the first one masked.
+  #
+  # This defaults on because the two mistakes are not the same size. Leaving
+  # affinity off with more than one replica breaks multi-turn hydration
+  # silently — the request succeeds and the answer is wrong. Turning it on for
+  # a purely single-shot workload costs some pod imbalance, and a client behind
+  # one NAT address counting as one client. Set it to None deliberately, when
+  # you know every request stands alone.
+  sessionAffinity: ClientIP
   sessionAffinityTimeoutSeconds: 10800
 
 ingress:

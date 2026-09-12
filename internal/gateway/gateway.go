@@ -454,11 +454,18 @@ func (g *Gateway) registerMetrics() *gatewayMetrics {
 		injection: reg.Counter("phigate_ingress_suspicious_total", "Inbound payloads matching prompt-injection patterns.", "rule"),
 	}
 
-	reg.Gauge("phigate_tokens_saved_total", "Cumulative upstream tokens avoided.",
+	// The three cumulative totals are counters, not gauges. Each is per-process
+	// and resets when the pod restarts, which is exactly what a Prometheus
+	// counter promises and what its reset detection is for. Published as gauges
+	// they could only answer "how much has this replica saved since it last
+	// started"; as counters, sum(increase(phigate_cost_saved_total[30d]))
+	// answers the question a finance team actually asks, across every replica
+	// and through the restarts a Kubernetes deployment does on its own.
+	reg.CounterFunc("phigate_tokens_saved_total", "Cumulative upstream tokens avoided.",
 		func() float64 { return float64(g.ledger.Totals().TokensSaved) })
-	reg.Gauge("phigate_cost_saved_total", "Cumulative upstream spend avoided, in the ledger currency.",
+	reg.CounterFunc("phigate_cost_saved_total", "Cumulative upstream spend avoided, in the ledger currency.",
 		func() float64 { return g.ledger.Totals().CostSaved })
-	reg.Gauge("phigate_cost_spent_total", "Cumulative cloud spend, in the ledger currency.",
+	reg.CounterFunc("phigate_cost_spent_total", "Cumulative cloud spend, in the ledger currency.",
 		func() float64 { return g.ledger.Totals().CloudCost })
 	reg.Gauge("phigate_cache_hit_ratio", "Template cache hit ratio.",
 		func() float64 { return g.cache.Stats().HitRate })

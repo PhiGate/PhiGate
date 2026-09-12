@@ -165,6 +165,12 @@
 <footer>
   PhiGate — SLM gateway for enterprise token optimisation and local security.
   Machine-readable equivalents: <code>/v1/phigate/stats</code>, <code>/metrics</code>.
+  <br>
+  Every figure above is <strong>this replica, since it last started</strong>. The
+  ledger is per-process and holds no shared state by design, so a deployment
+  running more than one pod saves more than this page shows. For the whole
+  deployment across restarts, sum the counters in Prometheus —
+  <code>sum(increase(phigate_cost_saved_total[30d]))</code>.
 </footer>
 
 </div>

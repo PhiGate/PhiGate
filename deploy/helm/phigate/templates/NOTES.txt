@@ -22,9 +22,26 @@ Point a client at it:
     -H 'Content-Type: application/json' \
     -d '{"model":"{{ .Values.backends.cloud.model }}","messages":[{"role":"user","content":"disk full on 10.0.0.5"}]}'
 
+{{- if and (gt (int .Values.replicaCount) 1) (ne .Values.service.sessionAffinity "ClientIP") }}
+
+  ⚠️  replicaCount is {{ .Values.replicaCount }} and service.sessionAffinity is
+     {{ .Values.service.sessionAffinity }}. The session dictionary that restores
+     <V1> to its real value is per-process, so a multi-turn conversation whose
+     follow-up lands on another replica cannot be hydrated. The request still
+     succeeds — the answer is just wrong. Set service.sessionAffinity=ClientIP,
+     or leave it only if every client sends self-contained requests.
+{{- end }}
+
 Then check what it saved:
 
   curl -H "Authorization: Bearer <your-client-key>" \
     localhost:{{ .Values.service.port }}/v1/phigate/stats
+{{- if gt (int .Values.replicaCount) 1 }}
+
+  That figure is this replica since it last started, not the deployment's — the
+  ledger is per-process by design. For the whole deployment, ask Prometheus:
+
+    sum(increase(phigate_cost_saved_total[30d]))
+{{- end }}
 
 Dashboard: /dashboard   Metrics: /metrics   Readiness: /readyz

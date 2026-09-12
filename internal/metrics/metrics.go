@@ -20,7 +20,7 @@ import (
 type Registry struct {
 	mu       sync.RWMutex
 	counters map[string]*labelledCounter
-	gauges   map[string]*gauge
+	sampled  map[string]*sampledValue
 	order    []string
 }
 
@@ -31,8 +31,11 @@ type labelledCounter struct {
 	labels []string
 }
 
-type gauge struct {
+// sampledValue is a metric read from its own source at scrape time rather than
+// incremented as events happen. kind is the exposition type it is published as.
+type sampledValue struct {
 	help string
+	kind string // "gauge" or "counter"
 	fn   func() float64
 }
 
@@ -40,7 +43,7 @@ type gauge struct {
 func New() *Registry {
 	return &Registry{
 		counters: make(map[string]*labelledCounter),
-		gauges:   make(map[string]*gauge),
+		sampled:  make(map[string]*sampledValue),
 	}
 }
 
@@ -59,15 +62,41 @@ func (r *Registry) Counter(name, help string, labels ...string) *Counter {
 }
 
 // Gauge registers a gauge sampled from fn at scrape time. Sampling on scrape
-// keeps derived values (cache size, session count, cumulative savings) exact
-// without a second bookkeeping path that could drift from the real one.
+// keeps derived values (cache size, session count) exact without a second
+// bookkeeping path that could drift from the real one.
 func (r *Registry) Gauge(name, help string, fn func() float64) {
+	r.register(name, &sampledValue{help: help, kind: "gauge", fn: fn})
+}
+
+// CounterFunc registers a cumulative total sampled from fn at scrape time and
+// published as a counter.
+//
+// The distinction from Gauge is not cosmetic. A cumulative figure published as
+// a gauge cannot be summed over time: rate() and increase() are defined on
+// counters, because only a counter carries the promise that a fall in value is
+// a process restart rather than a real decrease. PhiGate's savings totals are
+// per-process and reset when the pod does, so published as gauges they answered
+// "how much has this replica saved since it last started" and nothing else —
+// while "what did we save last month across the deployment" is the only
+// question a finance team asks. That is increase(phigate_cost_saved_total[30d])
+// summed across replicas, and it needs the counter type to be correct across
+// the restarts and rescheduling a Kubernetes deployment does routinely.
+//
+// The value still comes from the ledger at scrape time rather than from an
+// Inc() on the request path. A second bookkeeping path would be free to drift
+// from the ledger the dashboard and the audit log report, and a savings figure
+// that disagrees with itself is worse than one that is merely hard to query.
+func (r *Registry) CounterFunc(name, help string, fn func() float64) {
+	r.register(name, &sampledValue{help: help, kind: "counter", fn: fn})
+}
+
+func (r *Registry) register(name string, v *sampledValue) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if _, ok := r.gauges[name]; !ok {
+	if _, ok := r.sampled[name]; !ok {
 		r.order = append(r.order, name)
 	}
-	r.gauges[name] = &gauge{help: help, fn: fn}
+	r.sampled[name] = v
 }
 
 // Counter is a handle to a registered counter.
@@ -108,9 +137,9 @@ func (r *Registry) Gather() string {
 	for k, v := range r.counters {
 		counters[k] = v
 	}
-	gauges := make(map[string]*gauge, len(r.gauges))
-	for k, v := range r.gauges {
-		gauges[k] = v
+	sampled := make(map[string]*sampledValue, len(r.sampled))
+	for k, v := range r.sampled {
+		sampled[k] = v
 	}
 	r.mu.RUnlock()
 
@@ -130,9 +159,9 @@ func (r *Registry) Gather() string {
 			c.mu.RUnlock()
 			continue
 		}
-		if g, ok := gauges[name]; ok {
-			fmt.Fprintf(&b, "# HELP %s %s\n# TYPE %s gauge\n%s %g\n",
-				name, g.help, name, name, g.fn())
+		if v, ok := sampled[name]; ok {
+			fmt.Fprintf(&b, "# HELP %s %s\n# TYPE %s %s\n%s %g\n",
+				name, v.help, name, v.kind, name, v.fn())
 		}
 	}
 	return b.String()

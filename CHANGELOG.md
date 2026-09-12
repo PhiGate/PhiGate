@@ -12,6 +12,48 @@ read.
 
 ## [Unreleased]
 
+### Changed — what the cost figures say
+
+**Check your dashboards and your chart values before upgrading.** Two changes,
+both aimed at the same gap: PhiGate is sold on saving money and could not report
+what a *deployment* saved.
+
+- **The three cumulative totals are published as counters, not gauges.**
+  `phigate_tokens_saved_total`, `phigate_cost_saved_total` and
+  `phigate_cost_spent_total` were always named as counters and always carried
+  counter semantics — monotonic within a process, back to zero when the pod
+  restarts — but were declared `# TYPE ... gauge`. `rate()` and `increase()` are
+  defined on counters, because only a counter carries the promise that a fall is
+  a restart rather than a real decrease, so as gauges these could answer "what
+  has this replica saved since it last started" and nothing else. The question a
+  finance team asks is `sum(increase(phigate_cost_saved_total[30d]))`, and it now
+  returns the right number across replicas and through the restarts Kubernetes
+  does on its own. **Any existing panel or alert treating these as gauges needs
+  revisiting.**
+
+  The values still come from the ledger at scrape time rather than from an
+  `Inc()` on the request path. A second bookkeeping path would be free to drift
+  from the ledger the dashboard and the audit log report, and a savings figure
+  that disagrees with itself is worse than one that is merely hard to query.
+
+- **`service.sessionAffinity` now defaults to `ClientIP`.** The chart ships
+  `replicaCount: 2`, and the session dictionary that restores `<V1>` to its real
+  value is memory-only and per-process by design. With affinity off, a
+  multi-turn conversation whose follow-up lands on another replica cannot be
+  hydrated — and it does not fail, it answers wrongly. The two mistakes are not
+  the same size: affinity on a single-shot workload costs pod imbalance, affinity
+  off on a conversational one costs correctness. `helm install` now warns when
+  the combination is set back by hand.
+
+- **The per-replica scope is stated where the numbers are read.** The dashboard
+  footer, the `helm install` notes and the README all say that
+  `/v1/phigate/stats` and the dashboard report one pod since it last started,
+  and give the Prometheus queries for the deployment-wide figure. This was
+  documented only in a comment inside `values.yaml`, which is not where anyone
+  quoting a savings number to their CFO is looking.
+
+`internal/metrics` had no tests. It has three.
+
 ## [0.5.0] — 2026-09-12
 
 **Read "Changed — what is blocked" before upgrading.** The egress guard's
