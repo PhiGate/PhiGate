@@ -117,6 +117,10 @@ generate afresh rather than one of them replaying a cached answer.
 
 **Read the `disk-full-remediation` row before reading the average.** Its −7.40
 is not compression degrading an answer, it is the egress guard withholding one.
+*The defect it exposed has since been fixed* — a block now cuts out the
+offending span and delivers the rest — but the table is left as measured. It
+records what that build did on that day, and the figure a reader should distrust
+is the one a vendor quietly improves after the fact. Nobody has re-run it.
 The prompt asks for commands to clear a full `/var`; on four runs in five the
 model answered with `find` rooted at a system directory with `-delete`, which
 the `find_delete_root` rule blocks. The guard is doing exactly what it is sold
@@ -318,6 +322,31 @@ rm --force --recursive /             → BLOCK    (a regex deny list misses this
 
 Severity tiers exist because blocking every destructive-looking operation is how
 a guardrail gets switched off — and a guardrail that is off protects nothing.
+
+**A block withholds the command, not the answer around it.** The offending span
+is cut out and replaced with a notice naming the rule; the investigation steps,
+the explanation and any other code blocks are delivered untouched. What is
+returned is clean by construction rather than by inspection — the redaction unit
+is never smaller than the span the rule matched, and re-inspecting the result is
+never blocked, which is a property test run over the same fuzz corpus as the
+stream scanner. Tool calls are the exception and are dropped whole: an argument
+list is not prose, there is nothing in it worth keeping, and an agent handed the
+call would execute it.
+
+This matters more than it sounds. Measured on `eval/cases.json`, replacing the
+whole response cost 7.4 points out of 10 on a full-`/var` remediation — the `du`
+hunt, the `lsof` check and the log-rotation advice went out with the one command
+that earned the block, on the most common emergency in the job.
+
+**Streamed answers stop at the block instead.** Everything vetted before that
+point has already been sent and is safe to read; the tail is not sent. The
+scanner holds a unit, inspects it, and seals once a rule fires, because there is
+no safe way to resume a state machine whose invariant is that nothing after a
+block is emitted. The notice says so and says to re-request without streaming to
+get the full answer with the span cut out. Both transports agree on *whether* a
+rule fired and on which one — that is
+[`parity_test.go`](internal/sandbox/parity_test.go) — and neither emits the
+command.
 
 ---
 

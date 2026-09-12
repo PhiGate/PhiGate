@@ -43,6 +43,19 @@ type Segment struct {
 	Text  string
 	Scope Scope
 	Lang  string
+
+	// Line and EndLine are the inclusive 0-based line range the segment
+	// occupies in the text it was extracted from. For a fenced block they
+	// cover the fence markers as well, so replacing the range removes the
+	// whole block rather than leaving an empty fence behind.
+	//
+	// These exist so a blocking verdict can withhold the offending span
+	// instead of the entire answer. The unit is a line rather than a byte
+	// offset deliberately: the parser below is line-oriented, and a redaction
+	// unit that is never smaller than the unit the rules matched on cannot
+	// leave half of a matched command behind.
+	Line    int
+	EndLine int
 }
 
 // extractExecutable returns the parts of text that could plausibly be run.
@@ -63,32 +76,36 @@ func extractExecutable(text string) []Segment {
 	inFence := false
 	fenceMarker := ""
 	fenceLang := ""
+	fenceOpen := 0
 	var fenceBody []string
 
-	flushFence := func() {
+	flushFence := func(end int) {
 		if len(fenceBody) > 0 {
 			segs = append(segs, Segment{
-				Text:  strings.Join(fenceBody, "\n"),
-				Scope: ScopeCode,
-				Lang:  fenceLang,
+				Text:    strings.Join(fenceBody, "\n"),
+				Scope:   ScopeCode,
+				Lang:    fenceLang,
+				Line:    fenceOpen,
+				EndLine: end,
 			})
 		}
 		fenceBody = nil
 	}
 
-	for _, line := range lines {
+	for i, line := range lines {
 		trimmed := strings.TrimSpace(line)
 
 		if marker := fenceStart(trimmed); marker != "" && !inFence {
 			inFence = true
 			fenceMarker = marker
 			fenceLang = strings.ToLower(strings.TrimSpace(strings.TrimLeft(trimmed, "`~")))
+			fenceOpen = i
 			continue
 		}
 		if inFence {
 			if strings.HasPrefix(trimmed, fenceMarker) && strings.Trim(trimmed, "`~") == "" {
 				inFence = false
-				flushFence()
+				flushFence(i)
 				fenceLang = ""
 				continue
 			}
@@ -98,16 +115,16 @@ func extractExecutable(text string) []Segment {
 
 		// Outside a fence: inline code spans and unambiguous command lines.
 		for _, span := range inlineCode(line) {
-			segs = append(segs, Segment{Text: span, Scope: ScopeCode})
+			segs = append(segs, Segment{Text: span, Scope: ScopeCode, Line: i, EndLine: i})
 		}
 		if cmd := commandLine(line); cmd != "" {
-			segs = append(segs, Segment{Text: cmd, Scope: ScopeCommandLine})
+			segs = append(segs, Segment{Text: cmd, Scope: ScopeCommandLine, Line: i, EndLine: i})
 		}
 	}
 	if inFence {
 		// Unterminated fence — a truncated or still-streaming answer. Treat
 		// what we have as code rather than ignoring it.
-		flushFence()
+		flushFence(len(lines) - 1)
 	}
 	return segs
 }

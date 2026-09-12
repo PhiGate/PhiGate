@@ -40,6 +40,9 @@ guarantees:
 	go test -count=1 ./internal/policy/
 	@echo "== guard blocks catastrophe, allows prose =="
 	go test -count=1 ./internal/sandbox/ -run 'TestGuardBlocks|TestGuardBypasses|TestGuardDoesNotBlockProse'
+	@echo "== a block withholds the command, not the answer around it =="
+	go test -count=1 ./internal/sandbox/ -run 'TestRedact'
+	go test -count=1 ./internal/gateway/ -run 'TestBlockingPathWithholds'
 	@echo "== a streamed answer is guarded exactly as a blocking one =="
 	go test -count=1 ./internal/sandbox/ -run 'TestStreamingAgrees|TestScannerByteByByte|TestScannerEverySplit|TestScannerMatchesBlockingPath|TestScannerAmbiguousGrammarHolds'
 	@echo "== cache does not leak across sessions, nor answer the wrong question =="

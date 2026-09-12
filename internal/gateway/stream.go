@@ -174,7 +174,7 @@ func (g *Gateway) emitToolCalls(p *requestPlan, sw *sseWriter, scanner *sandbox.
 		sw.meta.EgressRule = v.Rule
 		sw.meta.EgressSeverity = v.Severity.String()
 		sw.header("X-PhiGate-Blocked", v.Rule)
-		_ = sw.emit("\n"+blockedNotice(v)+"\n", "content_filter")
+		_ = sw.emit("\n"+blockedNotice(v, false, true)+"\n", "content_filter")
 		return true
 	}
 
@@ -205,7 +205,7 @@ func (g *Gateway) newScanner(p *requestPlan, sw *sseWriter) *sandbox.StreamScann
 			sw.meta.EgressRule = v.Rule
 			sw.meta.EgressSeverity = v.Severity.String()
 			sw.header("X-PhiGate-Blocked", v.Rule)
-			return sw.emit("\n"+blockedNotice(v)+"\n", "content_filter")
+			return sw.emit("\n"+sealedNotice(v)+"\n", "content_filter")
 		},
 		sandbox.Options{Mode: p.state.cfg.StreamMode, MaxBuffer: p.state.cfg.StreamMaxBuffer})
 }

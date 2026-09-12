@@ -447,8 +447,8 @@ func TestStreamBlocksDestructiveCommand(t *testing.T) {
 	if strings.Contains(body, "rm -rf /") {
 		t.Fatalf("destructive command leaked to client: %q", body)
 	}
-	if !strings.Contains(body, "withheld this answer") {
-		t.Errorf("expected redaction notice, got: %q", body)
+	if !strings.Contains(body, "⛔ PhiGate egress guardrail") {
+		t.Errorf("expected a guardrail notice, got: %q", body)
 	}
 	if strings.Contains(body, "echo done") {
 		t.Errorf("stream should be sealed after a block, got: %q", body)
@@ -1853,5 +1853,68 @@ func TestAnswerWithAnUnknownPlaceholderIsLeftAlone(t *testing.T) {
 	}
 	if !strings.Contains(got, "<V99>") {
 		t.Errorf("content = %q, want the unknown placeholder left as it was", got)
+	}
+}
+
+// TestBlockingPathWithholdsTheCommandNotTheAnswer.
+//
+// The regression this exists for is measurable rather than hypothetical:
+// disk-full-remediation scored 1.60 against a raw 9.00 in eval/cases.json,
+// because the guard replaced a four-step remediation with a notice over the
+// one step that earned the block. Disk exhaustion is the most common emergency
+// an AIOps assistant is asked about, and an assistant that answers it with a
+// wall is one whose guard gets switched off.
+func TestBlockingPathWithholdsTheCommandNotTheAnswer(t *testing.T) {
+	answer := "Here is a safe sequence to reclaim space in /var.\n" +
+		"\n" +
+		"### 1. Find the big consumers\n" +
+		"```bash\n" +
+		"du -xh /var --max-depth=2 | sort -rh | head -20\n" +
+		"```\n" +
+		"\n" +
+		"### 2. Check for deleted-but-open files\n" +
+		"```bash\n" +
+		"lsof +L1 | grep /var\n" +
+		"```\n" +
+		"\n" +
+		"### 3. Reclaim it\n" +
+		"```bash\n" +
+		"rm -rf /var\n" +
+		"```\n" +
+		"\n" +
+		"Rotate logs afterwards so this does not recur.\n"
+
+	local := &fakeClient{name: "local", reply: answer}
+	g := newTestGateway(t, testConfig(), local, &fakeClient{name: "cloud"})
+	rec, resp := postChat(t, g, "/var is full and the service will not start")
+	if rec.Code != 200 {
+		t.Fatalf("request failed: %d %s", rec.Code, rec.Body.String())
+	}
+	got := resp.Choices[0].Message.Content
+
+	if strings.Contains(got, "rm -rf /var") {
+		t.Fatalf("the blocked command reached the operator: %q", got)
+	}
+	if !strings.Contains(got, "⛔ PhiGate egress guardrail") {
+		t.Errorf("no guardrail notice: %q", got)
+	}
+	if resp.Choices[0].FinishReason != "content_filter" {
+		t.Errorf("finish_reason = %q, want content_filter", resp.Choices[0].FinishReason)
+	}
+	// The point of the change: the operator still gets the investigation.
+	for _, keep := range []string{
+		"du -xh /var",
+		"lsof +L1",
+		"Rotate logs afterwards",
+		"### 1. Find the big consumers",
+	} {
+		if !strings.Contains(got, keep) {
+			t.Errorf("safe content was withheld along with the command: %q missing from:\n%s", keep, got)
+		}
+	}
+	// X-PhiGate-Blocked must still mean a rule fired, even though the answer
+	// around the offending span survived.
+	if h := rec.Header().Get("X-PhiGate-Blocked"); h == "" {
+		t.Error("X-PhiGate-Blocked was not set for a blocked answer")
 	}
 }

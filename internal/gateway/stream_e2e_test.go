@@ -93,8 +93,13 @@ func TestStreamAndBlockingAgreeOnFencedCommand(t *testing.T) {
 	}
 	blockBody := respB.Choices[0].Message.Content
 
-	blockedWhenStreamed := strings.Contains(streamBody, "withheld this answer")
-	blockedWhenBlocking := strings.Contains(blockBody, "withheld this answer")
+	// Match the marker both notices share rather than either one's wording:
+	// the two transports say different things now — the blocking path cuts the
+	// span out and returns the rest, the streamed one stops where the rule
+	// fired — and the property under test is that they agree a rule fired.
+	const guardMarker = "⛔ PhiGate egress guardrail"
+	blockedWhenStreamed := strings.Contains(streamBody, guardMarker)
+	blockedWhenBlocking := strings.Contains(blockBody, guardMarker)
 	if blockedWhenStreamed != blockedWhenBlocking {
 		t.Errorf("the guard disagrees with itself across transports: streamed blocked=%v, non-streamed blocked=%v\nstreamed: %s\nblocking: %s",
 			blockedWhenStreamed, blockedWhenBlocking, streamBody, blockBody)

@@ -12,6 +12,46 @@ read.
 
 ## [Unreleased]
 
+### Changed — what is blocked
+
+**Re-approve this one before upgrading.** The egress guard no longer replaces a
+whole response when a rule fires. It cuts out the span the rule matched and
+delivers the rest, with a notice naming the rule where the span had been. What
+is *withheld* is unchanged — the same rules fire on the same text, and no
+command a rule matched reaches the operator — but what an operator now
+*receives* around it is different, and anything downstream that treated a block
+as "the answer is a notice and nothing else" will see prose it did not see
+before.
+
+The reason is measured rather than argued. On `eval/cases.json`,
+`disk-full-remediation` scored 1.60 against a raw 9.00: the model answered a
+full `/var` with a `du` hunt, an `lsof` check for deleted-but-open files, log
+rotation advice, and one `find ... -delete` rooted at a system directory. The
+guard was right about the last of those and threw the other three away with it,
+on four runs in five. Disk exhaustion is the most common emergency an AIOps
+assistant is asked about, and an assistant that answers it with a wall is one
+whose guard gets switched off — the same failure that scoped these rules to code
+rather than prose in the first place.
+
+What keeps this safe is the unit. The redaction is the whole segment the rules
+matched on, rounded out to line boundaries, and never anything smaller: cutting
+a matched command in half is the one outcome worse than either blocking or
+allowing it. `Guard.Redact` and `Guard.Inspect` share an evaluation path so they
+cannot disagree about what fired, and re-inspecting a redaction is never blocked
+— asserted as a property over the same fuzz corpus as the stream scanner, and
+added to `make guarantees` rather than left as a claim in a comment.
+
+Two things did not change. Tool calls are still dropped whole when a rule fires
+on their arguments: an argument list is not prose, there is nothing in it worth
+keeping, and an agent handed the call would execute it. And a *streamed* answer
+still stops at the block rather than resuming past it — everything vetted before
+that point has already been sent, the tail is not, and the scanner seals because
+there is no safe way to resume a state machine whose invariant is that nothing
+after a block is emitted. The streamed notice now says so, and says to re-request
+without streaming to get the full answer with the span cut out. The two
+transports still agree on whether a rule fired and which one, which is what
+`parity_test.go` asserts and what the guarantee was always about.
+
 ## [0.4.1] — 2026-09-12
 
 **If you report spend from the shipped example price book, the Claude Opus 4.x

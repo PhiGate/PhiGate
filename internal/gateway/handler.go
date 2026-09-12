@@ -537,9 +537,27 @@ func (g *Gateway) finalize(w http.ResponseWriter, p *requestPlan, resp *types.Ch
 			p.event.EgressBlocked = true
 			p.event.EgressRule = v.Rule
 			p.event.EgressSeverity = v.Severity.String()
-			msg.Content = blockedNotice(v)
+			// Withhold the offending spans, not the answer around them.
+			//
+			// Replacing the whole response was measured at -7.4 points out of
+			// 10 on disk-full-remediation in eval/cases.json: the model gave a
+			// du hunt, an lsof check for deleted-but-open files, log rotation
+			// advice and one `find ... -delete`, and the guard threw all four
+			// away over the last. An operator with a service down got a wall
+			// on the most common emergency in the job, which is how a guard
+			// ends up switched off — the same failure that scoped these rules
+			// to code rather than prose in the first place.
+			//
+			// What survives is clean by construction rather than by argument:
+			// Redact never returns text that Inspect would block, which is a
+			// property test over the same fuzz corpus as the stream scanner.
+			redacted, _ := p.state.guard.Redact(hydrated)
 			// Withholding the prose while still handing back the call it
 			// described would defeat the block: an agent executes the call.
+			// Arguments are not prose, so there is nothing in them worth
+			// keeping, and they go whole.
+			msg.Content = blockedNotice(v, redacted != hydrated, len(msg.ToolCalls) > 0) +
+				"\n\n---\n\n" + redacted
 			msg.ToolCalls = nil
 			resp.Choices[i].FinishReason = "content_filter"
 			continue
@@ -730,11 +748,50 @@ func (g *Gateway) buildUpstream(model string, orig types.ChatCompletionRequest, 
 	return &up
 }
 
-func blockedNotice(v sandbox.Verdict) string {
-	return "⛔ PhiGate egress guardrail withheld this answer.\n\nRule: " + v.Rule +
+// blockedNotice explains a block to the operator.
+//
+// It says which of the two things happened, because they are not the same and
+// an operator acts on them differently: text that had a command cut out of it
+// is still worth reading, and an answer whose tool calls were dropped has had
+// nothing removed from its prose at all.
+func blockedNotice(v sandbox.Verdict, redactedText, droppedCalls bool) string {
+	out := "⛔ PhiGate egress guardrail withheld part of this answer.\n\nRule: " + v.Rule +
+		"\nReason: " + v.Reason + "\n\n"
+	switch {
+	case redactedText && droppedCalls:
+		out += "The model proposed an operation classified as unrecoverable. It has " +
+			"been cut out of the text below, and the tool calls that came with it " +
+			"were dropped whole."
+	case redactedText:
+		out += "The model proposed an operation classified as unrecoverable. It has " +
+			"been cut out of the text below; the rest of the answer is unchanged."
+	case droppedCalls:
+		out += "The answer's text was clean. The tool calls it carried were not, and " +
+			"were dropped whole."
+	default:
+		out += "The model proposed an operation classified as unrecoverable and it " +
+			"has been withheld."
+	}
+	return out + "\n\nReview before running anything."
+}
+
+// sealedNotice explains a block that stopped a *streamed* answer partway.
+//
+// The streaming scanner seals on a block rather than cutting the span out and
+// carrying on: it holds a unit, inspects it, and once a rule fires there is no
+// safe way to resume a state machine whose invariant is that nothing after a
+// block is emitted. Everything vetted before that point has already reached the
+// client, so the operator is not left with nothing — but the tail is gone, and
+// the blocking path would have returned it with only the offending span
+// removed. Saying so, and saying how to get it, is better than leaving the
+// operator to discover that two clients of the same gateway answer differently.
+func sealedNotice(v sandbox.Verdict) string {
+	return "⛔ PhiGate egress guardrail stopped this answer here.\n\nRule: " + v.Rule +
 		"\nReason: " + v.Reason +
-		"\n\nThe model proposed an operation classified as unrecoverable. " +
-		"Review it manually before running anything."
+		"\n\nThe model proposed an operation classified as unrecoverable. Everything " +
+		"above this point was vetted before it was sent; nothing after it was. " +
+		"Re-request without streaming to get the rest of the answer with the " +
+		"offending command cut out of it instead.\n\nReview before running anything."
 }
 
 func warnNotice(v sandbox.Verdict) string {
